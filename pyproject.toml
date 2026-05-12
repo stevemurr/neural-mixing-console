@@ -1,0 +1,65 @@
+[project]
+name = "neural-mixing-console"
+version = "0.1.0"
+description = "Differentiable mixing graph + multitrack encoder for learning audio mixing from engineer reference mixes."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "TODO" }   # pick a license; note the source datasets carry their own (Cambridge-MT is non-commercial).
+authors = [{ name = "Steve Murr" }]
+
+dependencies = [
+    # Core DL / DSP.
+    "torch>=2.2",
+    "torchaudio>=2.2",
+    "numpy>=1.24",
+    "scipy>=1.11",
+    # Audio I/O.
+    "soundfile>=0.12.1",
+    # Streaming multitrack shards.
+    "webdataset>=0.2.86",
+    # MERT per-track semantic embeddings (m-a-p/MERT-v1-95M).
+    "transformers>=4.40",
+    # Slakh metadata.yaml parsing (scripts/prepare_stage3_slakh.py).
+    "pyyaml>=6.0",
+    # Training UX.
+    "tqdm>=4.66",
+    "tensorboard>=2.15",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.5",
+    "pytest>=8",
+]
+
+# This is an application/research codebase, not an installable library — uv
+# installs the dependencies into the venv but does not "build" the project
+# itself. Modules are run via `python training/train_stage3.py`, `python infer.py`,
+# etc. (each sets up its own sys.path).
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# Keep it light: pyflakes + a few pycodestyle errors; not enforcing style nits.
+select = ["E4", "E7", "E9", "F"]
+
+# --- Notes for CUDA users ---
+# `torch`/`torchaudio` above resolve to whatever wheel uv picks for your
+# platform. For a specific CUDA build (this repo is developed on an NVIDIA
+# GB10 / DGX Spark), configure the PyTorch index, e.g.:
+#
+#   [tool.uv.sources]
+#   torch = { index = "pytorch-cu124" }
+#   torchaudio = { index = "pytorch-cu124" }
+#
+#   [[tool.uv.index]]
+#   name = "pytorch-cu124"
+#   url = "https://download.pytorch.org/whl/cu124"
+#   explicit = true
+#
+# ...adjusted to your CUDA version. Or just `uv pip install` torch/torchaudio
+# from the PyTorch index after `uv sync`.

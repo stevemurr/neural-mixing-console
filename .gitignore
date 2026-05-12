@@ -1,0 +1,56 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- IDE / editor / tooling ---
+.ropeproject/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- macOS ---
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+
+# --- Claude Code (keep settings.json shareable; ignore local overrides) ---
+.claude/settings.local.json
+
+# --- Working notes & experiment launchers (for the maintainer + agent, not public) ---
+notes/
+
+# --- Large data / artifacts: NOT tracked in git ---
+# (regenerate via scripts/, or obtain the raw datasets externally)
+#
+# Raw source datasets — Cambridge-MT multitracks, Slakh2100, preview WAVs.
+# Hundreds of GB, externally licensed; not ours to redistribute.
+source_audio/
+# Cambridge dataset prep tooling (separately vendored).
+datasets/
+# Generated WebDataset shards, MERT cache, model checkpoints, inference renders.
+dmc-data/
+# TensorBoard event files + per-run training logs.
+runs/
+# Misc run / render / regen / server logs.
+logs/
+*.log

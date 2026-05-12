@@ -1,0 +1,68 @@
+# Stage 3 v6.2 — round 8.
+#
+# Changes vs round 7 (v6.1), motivated by the round-7 best.pt render analysis
+# (every track got the same degenerate high-freq EQ — p2 pinned at +12 dB @
+# 10 kHz, hs at -10 dB @ 12 kHz — and the mix came out narrow, slightly left-
+# panned, ~5 dB quieter than the references):
+#
+#   Mixing-quality:
+#     - High-freq EQ ranges separated (reference/param_norm.py):
+#         p2_freq  [1000,10000] -> [1000,5000]    (high-mid bell, out of "air")
+#         hs_freq  [2000,12000] -> [5000,16000]   ("air" shelf)
+#         lpf_freq [5000,20000] -> [10000,22000]  (top-octave roll-off only)
+#       Removes the 3-band overlap in 8-14 kHz the encoder exploited.
+#       (Changes denormalized param meanings, so warm-start re-inits the param
+#        heads via preserve_head_priors — backbone transfers, heads start fresh
+#        from the range-aware engineer-default priors.)
+#     - w_stereo_side 2.5 (was 1.5): mix was ~9 dB narrower than the refs.
+#     - w_pan_mean 0.2 (re-enabled, was 0): every track was panned ~-0.24.
+#
+#   Loudness:
+#     - loudness_target_dbfs -15.0: trim head targets a FIXED level (~-14 LUFS
+#       for typical program) instead of matching each reference's idiosyncratic
+#       mastering level. Consistent target -> faster trim convergence + a
+#       predictable rendered-output level. Tune the value to taste.
+#     - w_loud 0.3 (was 0.1): trim head was barely supervised (landed at +5 dB
+#       when it needed ~+10).
+#     - trim_max_db 18.0 (was 12.0): CEF Mallorca needed +9.9 dB, brushing the
+#       ±12 cap.
+#
+# Carried from v6.1: no bypass heads, no comp knee, no clip shape/ceiling,
+# w_identity_prior 5e-3, activity mask (min_track_rms_dbfs -45), B=4 +
+# grad-accum 2 (effective batch 8), lr 2e-5, 6000 opt-steps, 8s shards,
+# n_max=42, shuffle_buffer 32, val_num_workers 0, cuda cap 0.75, RAM watchdog,
+# ckpt_every 1000, best-by-val checkpoint.
+
+[run]
+name = "v6.2-round8"
+# --out-dir defaults to dmc-data/checkpoints/<name>, --tb-logdir to runs/<name>,
+# and the run log to runs/<name>.log unless set explicitly in [train].
+
+[hardware]
+ram_floor_gb = 8                                # RAM watchdog: SIGTERM the trainer if MemAvailable drops below this
+pytorch_cuda_alloc_conf = "expandable_segments:True"
+
+[train]
+# Every key here maps 1:1 to a `python training/train_stage3.py` CLI flag
+# (key foo_bar -> --foo-bar). bool true -> bare flag; list -> repeated values.
+init_from = "dmc-data/checkpoints/stage3_v6_round7/mix_encoder_best.pt"
+preserve_head_priors = true
+shard_dirs = ["dmc-data/stage3_cambridge_8s", "dmc-data/stage3_slakh_8s"]
+n_max = 42
+num_workers = 2
+val_num_workers = 0
+shuffle_buffer = 32
+min_track_rms_dbfs = -45.0
+steps = 6000
+warmup_steps = 200
+batch_size = 4
+grad_accum_steps = 2
+lr = 2e-5
+trim_max_db = 18.0
+loudness_target_dbfs = -15.0
+cuda_memory_fraction = 0.75
+ckpt_every = 1000
+w_loud = 0.3
+w_stereo_side = 2.5
+w_pan_mean = 0.2
+w_identity_prior = 0.005
