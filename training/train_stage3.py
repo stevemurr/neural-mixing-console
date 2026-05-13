@@ -303,6 +303,36 @@ def _val_audio_pass(
 
 # ---------- Warm-start ----------
 
+class _EMA:
+    """Exponential moving average of model parameters.
+
+    Updated each optimizer step with `decay * ema + (1 - decay) * current`.
+    For a 250-step bounce period like round 9's, decay 0.999 (half-life ~693
+    optimizer steps) smooths several bounce cycles together — the resulting
+    state captures the "central" weight value the SGD is oscillating around,
+    not whichever bounce phase the most recent step happens to land on.
+    Saved as `mix_encoder_ema.pt` alongside every numbered checkpoint.
+    """
+
+    def __init__(self, model, decay: float):
+        self.decay = decay
+        self.state = {
+            k: v.detach().clone()
+            for k, v in model.state_dict().items()
+            if v.is_floating_point()
+        }
+
+    @torch.no_grad()
+    def update(self, model):
+        d = self.decay
+        for k, v in model.state_dict().items():
+            if k in self.state:
+                self.state[k].mul_(d).add_(v.detach(), alpha=1.0 - d)
+
+    def state_dict(self):
+        return self.state
+
+
 def _load_compatible_state(
     encoder: MixEncoder, ckpt_path: Path,
     *, exclude_prefixes: tuple[str, ...] = (),
@@ -443,6 +473,25 @@ def main() -> int:
 
     ap.add_argument("--no-rms-relative-threshold", action="store_true")
 
+    ap.add_argument("--alternate-datasets", action="store_true",
+                    help="With 2+ --shard-dirs, build one WebDataset pipeline per "
+                         "dir and round-robin them at the sample level so every "
+                         "batch has a fixed ratio of samples per source. Defeats "
+                         "the periodic train-loss bouncing seen when the combined "
+                         "shuffle reservoir's Cambridge↔Slakh mix drifts (round 9). "
+                         "Default off: original combined-shuffle behavior.")
+    ap.add_argument("--ema-decay", type=float, default=0.0,
+                    help="If > 0, maintain an exponential moving average of the "
+                         "encoder's float parameters (`ema = d * ema + (1-d) * "
+                         "current` after each optimizer step) and save it to "
+                         "mix_encoder_ema.pt at every --ckpt-every. Smooths over "
+                         "training-loop oscillation: the EMA state is the central "
+                         "value the SGD is bouncing around, not whichever phase the "
+                         "latest weights happen to land on. Recommended: 0.999 "
+                         "(~693-step half-life) for our 6000-step / 250-step-bounce "
+                         "regime; lower (0.99) for fast-moving runs, higher (0.9999) "
+                         "for very long runs. 0 disables.")
+
     # Bookkeeping
     ap.add_argument("--ckpt-every", type=int, default=2000)
     ap.add_argument("--log-every", type=int, default=10)
@@ -481,6 +530,7 @@ def main() -> int:
     print(f"  loss weights: w_recon={args.w_recon} w_log_mel={args.w_log_mel} "
           f"w_loud={args.w_loud} w_stereo_side={args.w_stereo_side} "
           f"w_identity_prior={args.w_identity_prior} w_pan_mean={args.w_pan_mean}")
+    print(f"  alternate_datasets: {args.alternate_datasets}  ema_decay: {args.ema_decay}")
 
     encoder = MixEncoder(
         sample_rate=SAMPLE_RATE,
@@ -527,6 +577,7 @@ def main() -> int:
         args.shard_dirs, shuffle=args.shuffle_buffer, split="train",
         max_tracks=args.n_max, repeat=True,
         mert_cache_root=args.mert_cache_root,
+        alternate=args.alternate_datasets,
     )
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, num_workers=args.num_workers,
@@ -539,6 +590,7 @@ def main() -> int:
         args.shard_dirs, shuffle=args.shuffle_buffer, split="val",
         max_tracks=args.n_max, repeat=True,
         mert_cache_root=args.mert_cache_root,
+        alternate=args.alternate_datasets,
     )
     val_loader = DataLoader(
         val_ds, batch_size=args.batch_size, num_workers=args.val_num_workers,
@@ -654,6 +706,10 @@ def main() -> int:
                     f"{preview_batch['meta'][i].get('session', '?')}", 0)
     tb.flush()
 
+    ema = _EMA(encoder, decay=args.ema_decay) if args.ema_decay > 0.0 else None
+    if ema is not None:
+        print(f"  EMA enabled (decay={args.ema_decay}) -> mix_encoder_ema.pt saved at every ckpt")
+
     optimizer = AdamW(encoder.parameters(), lr=args.lr, weight_decay=1e-4, betas=(0.9, 0.95))
 
     def lr_at(step: int) -> float:
@@ -768,6 +824,9 @@ def main() -> int:
         scaler.step(optimizer)
         scaler.update()
 
+        if ema is not None:
+            ema.update(encoder)
+
         # Per-(optimizer-)step log = mean of the window's micro-batch values.
         per_step_log = {k: (sum(v) / len(v)) for k, v in window_losses.items()}
         for k, v in per_step_log.items():
@@ -829,6 +888,10 @@ def main() -> int:
                         "args": vars(args)},
                        out_dir / f"mix_encoder_step{step+1:08d}.pt")
             torch.save(encoder.state_dict(), out_dir / "mix_encoder_latest.pt")
+            if ema is not None:
+                torch.save({"step": step + 1, "encoder_state_dict": ema.state_dict(),
+                            "ema_decay": args.ema_decay, "args": vars(args)},
+                           out_dir / "mix_encoder_ema.pt")
 
         pbar.update(1)
         step += 1

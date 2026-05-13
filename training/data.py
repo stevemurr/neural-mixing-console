@@ -124,6 +124,33 @@ class MertCacheLookup:
         return m.get(filename)
 
 
+class _RoundRobinIterableDataset(torch.utils.data.IterableDataset):
+    """Round-robin between several IterableDatasets at the sample level.
+
+    Used by `make_stage3_dataset(alternate=True)` to force a fixed dataset
+    ratio across `--shard-dirs`: with two sources, pipeline A and pipeline B
+    (each with its own shuffle reservoir) alternate every sample, so a
+    batch_size=4 batch always contains 2 from each source. Defeats the
+    periodic Cambridge↔Slakh sample-mix drift that the combined WebDataset
+    shuffle introduces. Each child pipeline should have `repeat=True` for
+    endless training; otherwise this iterator stops as soon as any child
+    exhausts.
+    """
+
+    def __init__(self, datasets):
+        super().__init__()
+        self.datasets = list(datasets)
+
+    def __iter__(self):
+        iters = [iter(d) for d in self.datasets]
+        while iters:
+            for it in iters:
+                try:
+                    yield next(it)
+                except StopIteration:
+                    return
+
+
 def make_stage3_dataset(
     shard_dirs: list[str | Path],
     *,
@@ -133,6 +160,7 @@ def make_stage3_dataset(
     repeat: bool = False,
     mert_cache_root: Optional[str | Path] = "dmc-data/mert_cache",
     drop_unmatched_mert: bool = False,
+    alternate: bool = False,
 ):
     """Yield real-data stage-3 bundles from one or more `dmc-data/stage3_*` dirs.
 
@@ -142,7 +170,24 @@ def make_stage3_dataset(
       - mert_embeddings:  (N, D) tensor (one per track; zeros if missing)
       - meta:             dict from meta.json
       - dataset:          "cambridge" | "slakh" (derived from shard dir name)
+
+    `alternate=True` with 2+ shard_dirs builds one WebDataset pipeline per
+    dir and round-robins them at the sample level (instead of merging all
+    shards into one shuffled pool). Use this when the per-dir distributions
+    are visibly different and you want every batch to be balanced across
+    sources.
     """
+    if alternate and len(shard_dirs) >= 2:
+        children = [
+            make_stage3_dataset(
+                [d], shuffle=shuffle, split=split, max_tracks=max_tracks,
+                repeat=repeat, mert_cache_root=mert_cache_root,
+                drop_unmatched_mert=drop_unmatched_mert, alternate=False,
+            )
+            for d in shard_dirs
+        ]
+        return _RoundRobinIterableDataset(children)
+
     all_shards = []
     for d in shard_dirs:
         d = Path(d)
