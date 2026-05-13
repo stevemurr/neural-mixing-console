@@ -1,17 +1,24 @@
-"""Loss functions for stage 3 v6.1 multitrack training.
+"""Loss functions for stage 3 v6.1+ multitrack training.
 
 - `mss_loss`: multi-resolution STFT loss (Yamamoto+18 / Engel+19 style).
 - `log_mel_l1`: L1 on log-mel spectrograms (auxiliary spectral loss).
-- `stereo_side_mss_loss`: MSS on the (L − R)/2 side channel, for stereo imaging.
-- `decoupled_recon_loss`: reconstruction loss that decouples loudness (trim head)
-  from timbre (loudness-normalized waveform / spectrum / log-mel).
-- `pan_mean_penalty`: |mean(pan)| penalty against catastrophic L/R bias. Note:
-  trivially satisfied by all-tracks-to-center, so prefer `stereo_side_mss_loss`
-  via `decoupled_recon_loss(..., w_stereo_side=...)` for the same job.
+- `stereo_side_mss_loss`: MSS on the (L − R)/2 side channel — *magnitude*,
+  sign-invariant. Catches per-band side-energy mismatch but cannot
+  distinguish a left-leaning mix from a right-leaning mix (same |STFT|).
+- `stereo_imbalance` / `stereo_width`: scalar audio features from the
+  Diff-MST (Steinmetz 2024) audio-feature loss. SI is sign-preserving and
+  fixes the gap above; SW gives a scalar width target.
+- `decoupled_recon_loss`: reconstruction loss that decouples loudness (trim
+  head) from timbre (loudness-normalized waveform / spectrum / log-mel +
+  optional stereo terms).
+- `pan_mean_penalty`: |mean(pan)| penalty in *param space* against
+  catastrophic L/R bias. Weak — trivially satisfied by all-tracks-to-center
+  and not energy-weighted. Prefer `w_imbalance` (audio-domain SI) for the
+  L/R-symmetry job; keep `pan_mean_penalty` only if you specifically want
+  a param-space regularizer.
 
-(v6.1 dropped `bypass_consistency_loss`: there are no bypass heads anymore —
-"bypassed" lives in the param space, gently encouraged by the identity-prior
-L2 in train_stage3.py rather than a discrete-target BCE.)
+(v6.1 dropped `bypass_consistency_loss`: no bypass heads — "bypassed" lives
+in the param space, gently encouraged by the identity-prior L2.)
 """
 
 from __future__ import annotations
@@ -124,6 +131,48 @@ def stereo_side_mss_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tens
     return mss_loss(side_p, side_t)
 
 
+def stereo_imbalance(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """Sign-preserving stereo imbalance ∈ [-1, +1] per batch element.
+
+    `SI = (P_R − P_L) / (P_R + P_L + eps)` where P_C is the per-channel mean
+    power. −1 = full left, +1 = full right, 0 = balanced (audio-engineering
+    "balance" convention). Diff-MST (Steinmetz 2024) "stereo imbalance"
+    feature — the canonical sign-preserving complement to magnitude-MSS
+    side losses, which alone cannot distinguish left- from right-leaning.
+
+    Scale-invariant: SI(α·x) = SI(x) for any α > 0 — so computing it on a
+    loudness-normalized prediction gives the same value as on the raw pred.
+
+    x: (B, 2, T). Returns (B,) ∈ [-1, +1].
+    """
+    if x.dim() != 3 or x.shape[1] != 2:
+        raise ValueError(f"expected (B, 2, T) stereo; got {x.shape}")
+    p_l = (x[:, 0] ** 2).mean(dim=-1)
+    p_r = (x[:, 1] ** 2).mean(dim=-1)
+    return (p_r - p_l) / (p_r + p_l + eps)
+
+
+def stereo_width(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """Stereo width = side-to-mid power ratio per batch element.
+
+    `SW = P_side / (P_mid + eps)` where mid = (L+R)/2, side = (L−R)/2. Low →
+    narrow / mono-leaning; higher → wider. Diff-MST (Steinmetz 2024)
+    "stereo width" feature; complements per-band side-channel MSS by
+    targeting overall width *magnitude* independently of spectrum shape.
+
+    Scale-invariant: SW(α·x) = SW(x) for any α > 0.
+
+    x: (B, 2, T). Returns (B,) ≥ 0.
+    """
+    if x.dim() != 3 or x.shape[1] != 2:
+        raise ValueError(f"expected (B, 2, T) stereo; got {x.shape}")
+    mid = 0.5 * (x[:, 0] + x[:, 1])
+    side = 0.5 * (x[:, 0] - x[:, 1])
+    p_mid = (mid ** 2).mean(dim=-1)
+    p_side = (side ** 2).mean(dim=-1)
+    return p_side / (p_mid + eps)
+
+
 def _combined_rms(x: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
     """Per-batch combined-stereo RMS: (B, 2, T) → (B,).
 
@@ -143,6 +192,8 @@ def decoupled_recon_loss(
     w_mss: float = 1.0,
     w_log_mel: float = 0.5,
     w_stereo_side: float = 0.0,
+    w_imbalance: float = 0.0,
+    w_width: float = 0.0,
     w_loud: float = 0.1,
     loudness_target_dbfs: float | None = None,
     sample_rate: int = 48_000,
@@ -217,6 +268,21 @@ def decoupled_recon_loss(
         l_side = stereo_side_mss_loss(pred_norm, target)
         out["L_stereo_side"] = l_side
         l_timbre = l_timbre + w_stereo_side * l_side
+    if w_imbalance > 0:
+        si_pred = stereo_imbalance(pred_norm)
+        si_targ = stereo_imbalance(target)
+        l_imbalance = (si_pred - si_targ).pow(2).mean()
+        out["L_imbalance"] = l_imbalance
+        l_timbre = l_timbre + w_imbalance * l_imbalance
+    if w_width > 0:
+        sw_pred = stereo_width(pred_norm)
+        sw_targ = stereo_width(target)
+        # log-ratio: scale-invariant on the ratio, and symmetric for SW < 1
+        # vs SW > 1 deviations (a 2× too-narrow miss costs the same as a 2×
+        # too-wide miss).
+        l_width = (torch.log(sw_pred + 1e-8) - torch.log(sw_targ + 1e-8)).pow(2).mean()
+        out["L_width"] = l_width
+        l_timbre = l_timbre + w_width * l_width
     out["L_timbre"] = l_timbre
 
     pred_level_db = 20.0 * torch.log10(pred_rms + rms_eps)
@@ -258,5 +324,6 @@ def pan_mean_penalty(pred_pan: torch.Tensor, mask: torch.Tensor) -> torch.Tensor
 
 __all__ = [
     "mss_loss", "log_mel_l1", "stereo_side_mss_loss",
+    "stereo_imbalance", "stereo_width",
     "decoupled_recon_loss", "pan_mean_penalty",
 ]

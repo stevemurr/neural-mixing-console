@@ -217,6 +217,7 @@ def _val_loss_pass(
     *,
     use_rms_relative_threshold: bool,
     w_stereo_side: float, w_loud: float, w_log_mel: float,
+    w_imbalance: float = 0.0, w_width: float = 0.0,
     loudness_target_dbfs: float | None = None,
 ) -> dict[str, float]:
     """Average losses over `val_batches` random validation batches."""
@@ -228,6 +229,10 @@ def _val_loss_pass(
         accum["L_log_mel"] = []
     if w_stereo_side > 0:
         accum["L_stereo_side"] = []
+    if w_imbalance > 0:
+        accum["L_imbalance"] = []
+    if w_width > 0:
+        accum["L_width"] = []
     with torch.no_grad():
         for _ in range(val_batches):
             try:
@@ -248,6 +253,7 @@ def _val_loss_pass(
                 rec = decoupled_recon_loss(
                     pred_mix, ref_mix.float(), out["trim_db"].float(),
                     w_log_mel=w_log_mel, w_loud=w_loud, w_stereo_side=w_stereo_side,
+                    w_imbalance=w_imbalance, w_width=w_width,
                     loudness_target_dbfs=loudness_target_dbfs,
                 )
             for k in accum:
@@ -455,11 +461,31 @@ def main() -> int:
                     help="weight on log-mel L1 in the timbre loss.")
     ap.add_argument("--w-stereo-side", type=float, default=0.0,
                     help="extra MSS loss on the side channel (L-R)/2 to encourage pan / "
-                         "stereo imaging. 0 disables; 1.0-3.0 recommended. Preferred "
-                         "over --w-pan-mean which can be trivially satisfied by "
-                         "all-tracks-to-center.")
+                         "stereo imaging. 0 disables; 1.0-3.0 recommended. Note: "
+                         "MAGNITUDE only — catches per-band side mismatch but is "
+                         "sign-invariant (can't distinguish left-leaning from right-"
+                         "leaning mixes). Pair with --w-imbalance for sign supervision.")
+    ap.add_argument("--w-imbalance", type=float, default=0.0,
+                    help="weight on stereo-imbalance MSE: (P_L-P_R)/(P_L+P_R) for pred "
+                         "vs ref. Scalar, sign-preserving — penalizes left-vs-right "
+                         "energy asymmetry directly in the audio domain. Diff-MST "
+                         "(Steinmetz 2024) 'stereo imbalance' audio feature. The "
+                         "principled replacement for --w-pan-mean: SI puts gradient "
+                         "on actual rendered energy distribution, not the pan-knob "
+                         "values, and is energy-weighted by construction. 0.5-1.0 "
+                         "recommended; 0 disables.")
+    ap.add_argument("--w-width", type=float, default=0.0,
+                    help="weight on stereo-width log-ratio MSE: P_side/P_mid for pred "
+                         "vs ref, log-domain so a 2× too-narrow miss costs the same "
+                         "as a 2× too-wide miss. Scalar width target — complements "
+                         "the per-band side MSS by constraining overall stereo "
+                         "spread independently of spectrum shape. Diff-MST 'stereo "
+                         "width' audio feature. 0.1-0.3 recommended; 0 disables.")
     ap.add_argument("--w-pan-mean", type=float, default=0.0,
-                    help="penalty on |mean(pan) over active tracks| per batch. Default off.")
+                    help="penalty on |mean(pan) over active tracks| in PARAM SPACE "
+                         "(not audio). Weak — unweighted by track energy, trivially "
+                         "satisfied by all-tracks-to-center. Default off. Prefer "
+                         "--w-imbalance for L/R-symmetry supervision.")
     ap.add_argument("--w-identity-prior", type=float, default=0.0,
                     help="weight on an L2 penalty pulling predicted params toward the "
                          "engineer-default values (encoder_priors.STRIP_DEFAULTS / "
@@ -529,6 +555,7 @@ def main() -> int:
     print(f"  trim_max_db: {args.trim_max_db}  loudness_target_dbfs: {args.loudness_target_dbfs}")
     print(f"  loss weights: w_recon={args.w_recon} w_log_mel={args.w_log_mel} "
           f"w_loud={args.w_loud} w_stereo_side={args.w_stereo_side} "
+          f"w_imbalance={args.w_imbalance} w_width={args.w_width} "
           f"w_identity_prior={args.w_identity_prior} w_pan_mean={args.w_pan_mean}")
     print(f"  alternate_datasets: {args.alternate_datasets}  ema_decay: {args.ema_decay}")
 
@@ -762,6 +789,7 @@ def main() -> int:
                 pred_mix, ref_mix.float(), out["trim_db"].float(),
                 w_log_mel=args.w_log_mel, w_loud=args.w_loud,
                 w_stereo_side=args.w_stereo_side,
+                w_imbalance=args.w_imbalance, w_width=args.w_width,
                 loudness_target_dbfs=args.loudness_target_dbfs,
             )
 
@@ -808,6 +836,10 @@ def main() -> int:
             window_losses.setdefault("L_log_mel", []).append(rec["L_log_mel"].item())
         if "L_stereo_side" in rec:
             window_losses.setdefault("L_stereo_side", []).append(rec["L_stereo_side"].item())
+        if "L_imbalance" in rec:
+            window_losses.setdefault("L_imbalance", []).append(rec["L_imbalance"].item())
+        if "L_width" in rec:
+            window_losses.setdefault("L_width", []).append(rec["L_width"].item())
         with torch.no_grad():
             trim = out["trim_db"].float()
             window_losses.setdefault("trim_db_mean", []).append(trim.mean().item())
@@ -847,6 +879,7 @@ def main() -> int:
                 tables, device,
                 use_rms_relative_threshold=not args.no_rms_relative_threshold,
                 w_stereo_side=args.w_stereo_side,
+                w_imbalance=args.w_imbalance, w_width=args.w_width,
                 w_loud=args.w_loud, w_log_mel=args.w_log_mel,
                 loudness_target_dbfs=args.loudness_target_dbfs,
             )
