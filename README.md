@@ -183,8 +183,3 @@ Not tracked (see `.gitignore`): `source_audio/` (raw datasets), `dmc-data/`
   checkpoint may be published separately (GitHub Releases / HuggingFace).
 - The data pipeline assumes you've separately obtained the raw datasets; only the
   prep/training/eval code is here, not the audio.
-
-## License
-
-TODO — pick one. Note the source datasets carry their own licenses (Cambridge-MT
-is non-commercial); anything derived from them inherits those terms.
