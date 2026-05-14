@@ -392,6 +392,16 @@ def main() -> int:
     ap.add_argument("--batch-size", type=int, default=2)
     ap.add_argument("--n-max", type=int, default=N_MAX)
     ap.add_argument("--num-workers", type=int, default=2)
+    ap.add_argument("--prefetch-factor", type=int, default=4,
+                    help="DataLoader prefetch_factor for the TRAIN loader: how many "
+                         "batches each worker preloads ahead of consumption. PyTorch's "
+                         "default (2) is too low for our setup — each step consumes 8 "
+                         "samples (B=4 × accum=2) of ~96 MB raw FLAC, and the workers "
+                         "can't always have the next batch ready when the GPU finishes "
+                         "the previous; the queue runs dry and the GPU idles ~750 ms / "
+                         "step (~4 %% wall-time). 4 keeps the queue topped up. Cost: "
+                         "RAM scales linearly with prefetch_factor × num_workers. "
+                         "Ignored when num_workers=0.")
     ap.add_argument("--grad-accum-steps", type=int, default=1,
                     help="Gradient accumulation: run this many micro-batches "
                          "(each of --batch-size) and accumulate their gradients "
@@ -606,11 +616,16 @@ def main() -> int:
         mert_cache_root=args.mert_cache_root,
         alternate=args.alternate_datasets,
     )
+    # prefetch_factor + persistent_workers are only valid when num_workers > 0.
+    train_loader_kwargs = {}
+    if args.num_workers > 0:
+        train_loader_kwargs["prefetch_factor"] = args.prefetch_factor
+        train_loader_kwargs["persistent_workers"] = True
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, num_workers=args.num_workers,
         collate_fn=lambda b: collate_stage3(b, n_max=args.n_max, mert_dim=MERT_DIM,
                                             min_track_rms_dbfs=args.min_track_rms_dbfs),
-        drop_last=True,
+        drop_last=True, **train_loader_kwargs,
     )
 
     val_ds = make_stage3_dataset(
