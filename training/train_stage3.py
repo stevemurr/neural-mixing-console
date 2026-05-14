@@ -392,16 +392,24 @@ def main() -> int:
     ap.add_argument("--batch-size", type=int, default=2)
     ap.add_argument("--n-max", type=int, default=N_MAX)
     ap.add_argument("--num-workers", type=int, default=2)
-    ap.add_argument("--prefetch-factor", type=int, default=4,
+    ap.add_argument("--prefetch-factor", type=int, default=2,
                     help="DataLoader prefetch_factor for the TRAIN loader: how many "
                          "batches each worker preloads ahead of consumption. PyTorch's "
-                         "default (2) is too low for our setup — each step consumes 8 "
-                         "samples (B=4 × accum=2) of ~96 MB raw FLAC, and the workers "
-                         "can't always have the next batch ready when the GPU finishes "
-                         "the previous; the queue runs dry and the GPU idles ~750 ms / "
-                         "step (~4 %% wall-time). 4 keeps the queue topped up. Cost: "
-                         "RAM scales linearly with prefetch_factor × num_workers. "
+                         "default is 2. Bumping closes the ~750 ms / step GPU idle gap "
+                         "between optimizer steps (workers refilling the queue) but "
+                         "RAM scales linearly with prefetch_factor × num_workers; each "
+                         "post-collate batch is ~516 MB at B=4 × n_max=42 × 2ch × T. "
+                         "3 workers × 4 prefetch ≈ 6 GB queue — OOM'd a Spark run on "
+                         "2026-05-13. Stay at 2 unless you've verified RAM headroom. "
                          "Ignored when num_workers=0.")
+    ap.add_argument("--persistent-workers", action="store_true",
+                    help="If set (and num_workers>0), DataLoader workers persist "
+                         "across all iterations instead of being respawned. Saves "
+                         "respawn cost — but with IterableDataset + repeat=True there "
+                         "are no epoch boundaries so respawn never happens anyway, "
+                         "and persistent workers accumulate state (MERT cache, "
+                         "shuffle reservoir) which can push memory pressure. Default "
+                         "off; turn on only if you have RAM headroom.")
     ap.add_argument("--grad-accum-steps", type=int, default=1,
                     help="Gradient accumulation: run this many micro-batches "
                          "(each of --batch-size) and accumulate their gradients "
@@ -620,7 +628,7 @@ def main() -> int:
     train_loader_kwargs = {}
     if args.num_workers > 0:
         train_loader_kwargs["prefetch_factor"] = args.prefetch_factor
-        train_loader_kwargs["persistent_workers"] = True
+        train_loader_kwargs["persistent_workers"] = args.persistent_workers
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, num_workers=args.num_workers,
         collate_fn=lambda b: collate_stage3(b, n_max=args.n_max, mert_dim=MERT_DIM,
