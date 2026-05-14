@@ -1,0 +1,88 @@
+# Stage 3 v6.2 — round 13. Per-track pan supervision via LSQ teacher.
+#
+# Round 12 added `--w-side-time` (time-domain L1 on the side channel) to
+# fix the |0| singular-point trap in the magnitude-MSS side loss. That
+# was a *real* bug, and the fix gives the model a non-zero gradient at
+# the mono fixed point. But — even with that fix and `w_imbalance` and
+# `w_stereo_side` all active, every loss term is **whole-mix global**:
+# the model has to back out, through the full DSP graph, what each
+# individual track's pan should be. Weak per-track gradient; many other
+# params can satisfy the same change.
+#
+# **Round 13 changes the problem.** Instead of supervising the global
+# side spectrum and hoping the encoder figures out per-track pan, we
+# pre-compute a *per-track pan target* from `(ref_mix, raw_stem_i)` via
+# per-channel least squares and add direct MSE supervision on each
+# track's pan parameter. Closed-form, no learned hyperparameters,
+# computed in the collate per batch:
+#
+#     g_L = ⟨ref_L, stem_i_mono⟩ / ‖stem_i_mono‖²
+#     g_R = ⟨ref_R, stem_i_mono⟩ / ‖stem_i_mono‖²
+#     pan_target_i = (g_R − g_L) / (g_R + g_L + eps)   ∈ [-1, +1]
+#
+# Robust to per-track EQ (the spectral scale factor cancels in the
+# ratio) and to gain (drops out of the ratio). Noisy for stems with
+# heavy effects sends (reverbs, delays add content the raw stem doesn't
+# have) and for stereo stems whose raw audio already has L/R structure;
+# the model averages over those.
+#
+# Smoke test recovered pans of -1.0, +0.5, 0.0 to within ~0.1 from a
+# 4-stem synthetic mix; silent stems correctly land at 0.
+#
+# **All audio-domain stereo losses disabled** (`w_stereo_side`,
+# `w_side_time`, `w_imbalance`, `w_pan_mean` all = 0). The per-track
+# target is the strongest signal we can give and the global losses
+# would just add noise to it (different signals on the same parameter,
+# potentially fighting). If round 13 works, the audio-domain stereo
+# terms are obsolete; if it doesn't, we re-enable selectively.
+#
+# **Round 13 changes (vs round 12):**
+#   - **NEW `--w-pan-target 5.0`** — direct MSE on (pan_pred, pan_lsq).
+#     5x because the term is small in magnitude (per-track MSE in
+#     [-1,+1] space, masked over active tracks); 5.0 brings the
+#     contribution into the same order as the recon losses.
+#   - `w_stereo_side`, `w_side_time`, `w_imbalance`, `w_pan_mean` all
+#     set to **0** (audio-domain stereo losses retired).
+#   - Everything else unchanged from round 12: alternate-datasets,
+#     ema-decay 0.999, val_batches 16, w_loud=0.2, w_log_mel=0.5,
+#     w_identity_prior=5e-3, B=4 + grad-accum 2, lr 1e-5, 6000 steps.
+#
+# Warm-start: round 11_2's best.pt (same as round 12 — apples-to-apples
+# comparison between "side_time fix" and "LSQ pan teacher").
+
+[run]
+name = "v6.2-round13"
+
+[hardware]
+ram_floor_gb = 8
+pytorch_cuda_alloc_conf = "expandable_segments:True"
+
+[train]
+init_from = "dmc-data/checkpoints/v6.2-round11_2/mix_encoder_best.pt"
+shard_dirs = ["dmc-data/stage3_cambridge_8s", "dmc-data/stage3_slakh_8s"]
+alternate_datasets = true
+ema_decay = 0.999
+n_max = 42
+num_workers = 2
+val_num_workers = 0
+shuffle_buffer = 32
+min_track_rms_dbfs = -45.0
+steps = 6000
+warmup_steps = 200
+batch_size = 4
+grad_accum_steps = 2
+lr = 1e-5
+trim_max_db = 18.0
+loudness_target_dbfs = -15.0
+cuda_memory_fraction = 0.75
+ckpt_every = 500
+val_every = 250
+val_batches = 16
+w_loud = 0.2
+w_stereo_side = 0.0
+w_side_time = 0.0
+w_imbalance = 0.0
+w_width = 0.0
+w_pan_mean = 0.0
+w_pan_target = 5.0
+w_identity_prior = 0.005

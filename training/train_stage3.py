@@ -219,6 +219,7 @@ def _val_loss_pass(
     w_stereo_side: float, w_loud: float, w_log_mel: float,
     w_side_time: float = 0.0,
     w_imbalance: float = 0.0, w_width: float = 0.0,
+    w_pan_target: float = 0.0,
     loudness_target_dbfs: float | None = None,
 ) -> dict[str, float]:
     """Average losses over `val_batches` random validation batches."""
@@ -236,6 +237,8 @@ def _val_loss_pass(
         accum["L_imbalance"] = []
     if w_width > 0:
         accum["L_width"] = []
+    if w_pan_target > 0:
+        accum["L_pan_target"] = []
     with torch.no_grad():
         for _ in range(val_batches):
             try:
@@ -260,6 +263,13 @@ def _val_loss_pass(
                     w_imbalance=w_imbalance, w_width=w_width,
                     loudness_target_dbfs=loudness_target_dbfs,
                 )
+                if w_pan_target > 0.0 and "pan_target" in batch:
+                    pan_idx = STRIP_PARAM_KEYS.index("pan")
+                    pan_pred = 2.0 * out["track_params"][..., pan_idx].float() - 1.0
+                    pan_tgt = batch["pan_target"].to(device, non_blocking=True).float()
+                    m = track_mask.float()
+                    diff_sq = (pan_pred - pan_tgt).pow(2) * m
+                    rec["L_pan_target"] = diff_sq.sum() / m.sum().clamp(min=1.0)
             for k in accum:
                 if k in rec:
                     accum[k].append(rec[k].item())
@@ -519,6 +529,18 @@ def main() -> int:
                          "(not audio). Weak — unweighted by track energy, trivially "
                          "satisfied by all-tracks-to-center. Default off. Prefer "
                          "--w-imbalance for L/R-symmetry supervision.")
+    ap.add_argument("--w-pan-target", type=float, default=0.0,
+                    help="weight on per-track PAN target supervision (MSE on predicted "
+                         "pan vs LSQ-fit pan target from (ref_mix, raw_stem) — see "
+                         "`collate_stage3(compute_pan_target=True)`). Direct pointwise "
+                         "supervision on the pan parameter from the data — the ratio "
+                         "of L vs R dot products tells us exactly how much of each "
+                         "stem the engineer routed to each channel. Bypasses the "
+                         "indirect side-loss / SI gradient path entirely. 5.0 "
+                         "recommended; pair with `w_stereo_side=0`, `w_side_time=0`, "
+                         "`w_imbalance=0` (the audio-domain stereo losses become "
+                         "redundant once per-track pan is directly supervised). 0 "
+                         "disables (also disables the LSQ computation in the collate).")
     ap.add_argument("--w-identity-prior", type=float, default=0.0,
                     help="weight on an L2 penalty pulling predicted params toward the "
                          "engineer-default values (encoder_priors.STRIP_DEFAULTS / "
@@ -590,6 +612,7 @@ def main() -> int:
           f"w_loud={args.w_loud} w_stereo_side={args.w_stereo_side} "
           f"w_side_time={args.w_side_time} "
           f"w_imbalance={args.w_imbalance} w_width={args.w_width} "
+          f"w_pan_target={args.w_pan_target} "
           f"w_identity_prior={args.w_identity_prior} w_pan_mean={args.w_pan_mean}")
     print(f"  alternate_datasets: {args.alternate_datasets}  ema_decay: {args.ema_decay}")
 
@@ -648,7 +671,8 @@ def main() -> int:
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, num_workers=args.num_workers,
         collate_fn=lambda b: collate_stage3(b, n_max=args.n_max, mert_dim=MERT_DIM,
-                                            min_track_rms_dbfs=args.min_track_rms_dbfs),
+                                            min_track_rms_dbfs=args.min_track_rms_dbfs,
+                                            compute_pan_target=args.w_pan_target > 0.0),
         drop_last=True, **train_loader_kwargs,
     )
 
@@ -661,7 +685,8 @@ def main() -> int:
     val_loader = DataLoader(
         val_ds, batch_size=args.batch_size, num_workers=args.val_num_workers,
         collate_fn=lambda b: collate_stage3(b, n_max=args.n_max, mert_dim=MERT_DIM,
-                                            min_track_rms_dbfs=args.min_track_rms_dbfs),
+                                            min_track_rms_dbfs=args.min_track_rms_dbfs,
+                                            compute_pan_target=args.w_pan_target > 0.0),
         drop_last=True,
     )
     val_iter = iter(val_loader)
@@ -844,6 +869,21 @@ def main() -> int:
             l_total = l_total + args.w_pan_mean * l_pan
             window_losses.setdefault("L_pan_mean", []).append(l_pan.item())
 
+        # Per-track pan target supervision — MSE on predicted pan vs the
+        # LSQ-fit pan target from the collate. Direct pointwise gradient on
+        # each pan param: ~95 % of stems get a clean target; rare heavily-
+        # processed ones contribute noise the optimizer averages over.
+        if args.w_pan_target > 0.0 and "pan_target" in batch:
+            with torch.amp.autocast("cuda", enabled=False):
+                pan_idx = STRIP_PARAM_KEYS.index("pan")
+                pan_pred = 2.0 * out["track_params"][..., pan_idx].float() - 1.0  # (B, N)
+                pan_tgt = batch["pan_target"].to(device, non_blocking=True).float()
+                m = track_mask.float()
+                diff_sq = (pan_pred - pan_tgt).pow(2) * m
+                l_pan_target = diff_sq.sum() / m.sum().clamp(min=1.0)
+            l_total = l_total + args.w_pan_target * l_pan_target
+            window_losses.setdefault("L_pan_target", []).append(l_pan_target.item())
+
         # Identity prior: smooth L2 pulling params toward the engineer-default
         # values. Replaces the old bypass-consistency BCE — no discrete
         # threshold, no self-reinforcing "everything bypassed" basin. Strip
@@ -923,6 +963,7 @@ def main() -> int:
                 w_stereo_side=args.w_stereo_side,
                 w_side_time=args.w_side_time,
                 w_imbalance=args.w_imbalance, w_width=args.w_width,
+                w_pan_target=args.w_pan_target,
                 w_loud=args.w_loud, w_log_mel=args.w_log_mel,
                 loudness_target_dbfs=args.loudness_target_dbfs,
             )

@@ -259,13 +259,16 @@ def make_stage3_dataset(
 
 
 def collate_stage3(batch: list[dict], n_max: int = 12, mert_dim: int = 768,
-                   min_track_rms_dbfs: float = float("-inf")) -> dict:
+                   min_track_rms_dbfs: float = float("-inf"),
+                   compute_pan_target: bool = False) -> dict:
     """Stack stage 3 bundles. Returns:
         tracks:           (B, N_max, 2, T)
         track_mask:       (B, N_max)
         mix:              (B, 2, T)
         mert_embeddings:  (B, N_max, mert_dim)  — zeros where missing
         meta:             list[dict]
+        pan_target?:      (B, N_max) ∈ [-1, +1] — per-track LSQ pan estimate,
+                                                  only when compute_pan_target=True
 
     `min_track_rms_dbfs`: if a track's segment-RMS is below this threshold,
     its `track_mask` slot is set to False so the encoder treats it as absent.
@@ -276,6 +279,16 @@ def collate_stage3(batch: list[dict], n_max: int = 12, mert_dim: int = 768,
     that have any signal alone. Safety: if ALL tracks in an example would be
     masked, the mask is NOT applied for that example (degenerate batch
     avoidance — the example is left intact and the trainer sees it normally).
+
+    `compute_pan_target`: when True, also fit a per-track pan-and-gain via
+    per-channel least squares against the reference mix:
+        g_L = ⟨ref_L, track_i_mono⟩ / ‖track_i_mono‖²
+        g_R = ⟨ref_R, track_i_mono⟩ / ‖track_i_mono‖²
+        pan_target_i = (g_R - g_L) / (g_R + g_L + eps)  ∈ [-1, +1]
+    Sign convention: -1 = full L, +1 = full R (matches our `stereo_imbalance`
+    convention). The estimate is robust to per-track EQ (the spectral scale
+    factor cancels in the ratio) but not to heavy non-linear processing —
+    good enough for ~95 % of stems; the model will average over the rest.
     """
     B = len(batch)
     T = batch[0]["mix"].shape[-1]
@@ -320,10 +333,32 @@ def collate_stage3(batch: list[dict], n_max: int = 12, mert_dim: int = 768,
             mx = torch.cat([mx, torch.zeros(2, T - mt, dtype=mx.dtype)], dim=-1)
         mixes[bi] = mx
         metas.append(ex["meta"])
-    return {
+
+    result = {
         "tracks": tracks_padded, "track_mask": masks,
         "mix": mixes, "mert_embeddings": mert, "meta": metas,
     }
+
+    if compute_pan_target:
+        # Per-channel LSQ pan estimate. Mono raw stem against each ref channel.
+        # Operate on full-batch tensors — closed-form, vectorized over (B, N).
+        # Reduces along T (one dot product per (b, i, channel)).
+        tracks_mono = 0.5 * (tracks_padded[:, :, 0, :] + tracks_padded[:, :, 1, :])  # (B, N, T)
+        dot_L = (mixes[:, 0:1, :] * tracks_mono).sum(dim=-1)  # (B, N)
+        dot_R = (mixes[:, 1:2, :] * tracks_mono).sum(dim=-1)
+        # pan_target = (dot_R - dot_L) / (dot_R + dot_L + eps); track energy cancels
+        # in the ratio so we don't need to divide each dot by ‖track‖².
+        eps = 1e-9
+        pan_target = (dot_R - dot_L) / (dot_R + dot_L + eps)
+        pan_target = pan_target.clamp(-1.0, 1.0)
+        # Silent stems give a noisy ratio; fold them to 0 (center) explicitly.
+        stem_energy = (tracks_mono ** 2).sum(dim=-1)  # (B, N)
+        pan_target = torch.where(
+            stem_energy > 1e-9, pan_target, torch.zeros_like(pan_target)
+        )
+        result["pan_target"] = pan_target
+
+    return result
 
 
 __all__ = [
