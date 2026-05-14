@@ -122,6 +122,13 @@ def stereo_side_mss_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tens
     the side channel — explicitly penalizing failures to reproduce the
     stereo image — so the model gets a strong gradient through pan / width.
 
+    *Critical caveat:* MSS is `|STFT(·)|`-based — pure magnitude. At a mono
+    pred (`L == R`, side == 0) the loss has nonzero VALUE (`|STFT(ref_side)|`)
+    but **zero GRADIENT** w.r.t. pred (the derivative of `|0|` is zero), so
+    the center is a stable fixed point the optimizer cannot escape through
+    this loss alone. Pair with `stereo_side_time_l1` for a sign-preserving
+    time-domain term that *does* have non-zero gradient at center.
+
     pred, target: (B, 2, T) stereo tensors. Returns scalar MSS on side.
     """
     if pred.shape != target.shape or pred.dim() != 3 or pred.shape[1] != 2:
@@ -129,6 +136,33 @@ def stereo_side_mss_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tens
     side_p = 0.5 * (pred[:, 0:1, :] - pred[:, 1:2, :])
     side_t = 0.5 * (target[:, 0:1, :] - target[:, 1:2, :])
     return mss_loss(side_p, side_t)
+
+
+def stereo_side_time_l1(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """L1 on the time-domain side signal `(L − R) / 2`.
+
+    The companion to `stereo_side_mss_loss` that fixes its singular-point
+    issue at the mono fixed point. Where the magnitude-MSS loss has zero
+    gradient at pred-side == 0 (so a center-collapsed model cannot
+    differentially learn to pan), this time-domain L1 has gradient
+    `sign(side_pred − side_target)` per sample — sign-preserving, non-zero
+    at center (gradient becomes `-sign(side_target)`, pointing toward the
+    correct sign of the reference side signal). So the *sign* of the
+    panning is supervised by this term, while the *magnitude / spectrum*
+    of the panning is supervised by the MSS magnitude term — they're
+    complementary and should be used together (round-12 onward).
+
+    Phase-sensitive (unlike MSS magnitude). Fine for our setup because
+    pred and ref are time-aligned (same source tracks, same start, trim
+    head adjusts level not phase).
+
+    pred, target: (B, 2, T) stereo. Returns scalar.
+    """
+    if pred.shape != target.shape or pred.dim() != 3 or pred.shape[1] != 2:
+        raise ValueError(f"expected (B, 2, T) stereo tensors; got pred {pred.shape}")
+    side_p = 0.5 * (pred[:, 0, :] - pred[:, 1, :])
+    side_t = 0.5 * (target[:, 0, :] - target[:, 1, :])
+    return (side_p - side_t).abs().mean()
 
 
 def stereo_imbalance(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -192,6 +226,7 @@ def decoupled_recon_loss(
     w_mss: float = 1.0,
     w_log_mel: float = 0.5,
     w_stereo_side: float = 0.0,
+    w_side_time: float = 0.0,
     w_imbalance: float = 0.0,
     w_width: float = 0.0,
     w_loud: float = 0.1,
@@ -268,6 +303,10 @@ def decoupled_recon_loss(
         l_side = stereo_side_mss_loss(pred_norm, target)
         out["L_stereo_side"] = l_side
         l_timbre = l_timbre + w_stereo_side * l_side
+    if w_side_time > 0:
+        l_side_time = stereo_side_time_l1(pred_norm, target)
+        out["L_side_time"] = l_side_time
+        l_timbre = l_timbre + w_side_time * l_side_time
     if w_imbalance > 0:
         si_pred = stereo_imbalance(pred_norm)
         si_targ = stereo_imbalance(target)
@@ -323,7 +362,7 @@ def pan_mean_penalty(pred_pan: torch.Tensor, mask: torch.Tensor) -> torch.Tensor
 
 
 __all__ = [
-    "mss_loss", "log_mel_l1", "stereo_side_mss_loss",
+    "mss_loss", "log_mel_l1", "stereo_side_mss_loss", "stereo_side_time_l1",
     "stereo_imbalance", "stereo_width",
     "decoupled_recon_loss", "pan_mean_penalty",
 ]

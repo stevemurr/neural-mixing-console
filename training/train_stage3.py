@@ -217,6 +217,7 @@ def _val_loss_pass(
     *,
     use_rms_relative_threshold: bool,
     w_stereo_side: float, w_loud: float, w_log_mel: float,
+    w_side_time: float = 0.0,
     w_imbalance: float = 0.0, w_width: float = 0.0,
     loudness_target_dbfs: float | None = None,
 ) -> dict[str, float]:
@@ -229,6 +230,8 @@ def _val_loss_pass(
         accum["L_log_mel"] = []
     if w_stereo_side > 0:
         accum["L_stereo_side"] = []
+    if w_side_time > 0:
+        accum["L_side_time"] = []
     if w_imbalance > 0:
         accum["L_imbalance"] = []
     if w_width > 0:
@@ -253,6 +256,7 @@ def _val_loss_pass(
                 rec = decoupled_recon_loss(
                     pred_mix, ref_mix.float(), out["trim_db"].float(),
                     w_log_mel=w_log_mel, w_loud=w_loud, w_stereo_side=w_stereo_side,
+                    w_side_time=w_side_time,
                     w_imbalance=w_imbalance, w_width=w_width,
                     loudness_target_dbfs=loudness_target_dbfs,
                 )
@@ -481,8 +485,19 @@ def main() -> int:
                     help="extra MSS loss on the side channel (L-R)/2 to encourage pan / "
                          "stereo imaging. 0 disables; 1.0-3.0 recommended. Note: "
                          "MAGNITUDE only — catches per-band side mismatch but is "
-                         "sign-invariant (can't distinguish left-leaning from right-"
-                         "leaning mixes). Pair with --w-imbalance for sign supervision.")
+                         "sign-invariant AND has zero gradient at the mono fixed point "
+                         "(|0| is non-differentiable). Pair with --w-side-time for the "
+                         "sign-preserving complement and --w-imbalance for balance.")
+    ap.add_argument("--w-side-time", type=float, default=0.0,
+                    help="L1 on the TIME-DOMAIN side signal (L-R)/2 — `|side_pred - "
+                         "side_ref|.mean()`. Companion to --w-stereo-side. Where the "
+                         "magnitude-MSS variant has ZERO gradient at the mono fixed "
+                         "point (`d|0|/dx = 0`, so a center-collapsed model cannot "
+                         "learn to pan through that loss alone), this time-domain "
+                         "L1 has gradient `sign(side_pred - side_ref)` per sample — "
+                         "sign-preserving and non-zero at center. Supervises the "
+                         "sign of panning; magnitude/spectrum still supervised by "
+                         "--w-stereo-side. 2.0 recommended (alongside w_stereo_side=2.0).")
     ap.add_argument("--w-imbalance", type=float, default=0.0,
                     help="weight on stereo-imbalance MSE: (P_L-P_R)/(P_L+P_R) for pred "
                          "vs ref. Scalar, sign-preserving — penalizes left-vs-right "
@@ -573,6 +588,7 @@ def main() -> int:
     print(f"  trim_max_db: {args.trim_max_db}  loudness_target_dbfs: {args.loudness_target_dbfs}")
     print(f"  loss weights: w_recon={args.w_recon} w_log_mel={args.w_log_mel} "
           f"w_loud={args.w_loud} w_stereo_side={args.w_stereo_side} "
+          f"w_side_time={args.w_side_time} "
           f"w_imbalance={args.w_imbalance} w_width={args.w_width} "
           f"w_identity_prior={args.w_identity_prior} w_pan_mean={args.w_pan_mean}")
     print(f"  alternate_datasets: {args.alternate_datasets}  ema_decay: {args.ema_decay}")
@@ -812,6 +828,7 @@ def main() -> int:
                 pred_mix, ref_mix.float(), out["trim_db"].float(),
                 w_log_mel=args.w_log_mel, w_loud=args.w_loud,
                 w_stereo_side=args.w_stereo_side,
+                w_side_time=args.w_side_time,
                 w_imbalance=args.w_imbalance, w_width=args.w_width,
                 loudness_target_dbfs=args.loudness_target_dbfs,
             )
@@ -859,6 +876,8 @@ def main() -> int:
             window_losses.setdefault("L_log_mel", []).append(rec["L_log_mel"].item())
         if "L_stereo_side" in rec:
             window_losses.setdefault("L_stereo_side", []).append(rec["L_stereo_side"].item())
+        if "L_side_time" in rec:
+            window_losses.setdefault("L_side_time", []).append(rec["L_side_time"].item())
         if "L_imbalance" in rec:
             window_losses.setdefault("L_imbalance", []).append(rec["L_imbalance"].item())
         if "L_width" in rec:
@@ -902,6 +921,7 @@ def main() -> int:
                 tables, device,
                 use_rms_relative_threshold=not args.no_rms_relative_threshold,
                 w_stereo_side=args.w_stereo_side,
+                w_side_time=args.w_side_time,
                 w_imbalance=args.w_imbalance, w_width=args.w_width,
                 w_loud=args.w_loud, w_log_mel=args.w_log_mel,
                 loudness_target_dbfs=args.loudness_target_dbfs,

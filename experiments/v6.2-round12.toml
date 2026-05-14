@@ -1,0 +1,91 @@
+# Stage 3 v6.2 — round 12. Time-domain side L1 fix for the mono fixed point.
+#
+# Round 11_2 audition (best.pt @ step 1249, val L_recon 2.14) revealed the
+# model is producing center-collapsed mixes: background vocals all
+# panned to the middle, tracks not spread across the stereo field.
+# Timbre and dynamics improving, but the stereo image is broken.
+#
+# **Root cause: the magnitude-MSS side loss has zero gradient at the
+# mono fixed point.** `stereo_side_mss_loss` is `|STFT((L−R)/2)|`-based:
+# at pred = exact mono (L == R, side == 0), the LOSS VALUE is nonzero
+# (`|STFT(ref_side)|`) but the GRADIENT w.r.t. pred is exactly zero
+# (the derivative of `|0|` is zero). Verified by a smoke test:
+#
+#   stereo_side_mss_loss at mono pred:
+#     loss value:      10.77   (model knows it's wrong)
+#     gradient norm:   0.0     (model cannot escape)
+#
+# The center is a *stable* fixed point. The optimizer has no signal
+# telling it which way to move pan, so it doesn't. `L_imbalance` is
+# trivially satisfied at the center (P_L = P_R), so it offers no escape
+# either. The model parks at all-tracks-center and the timbre/comp/EQ
+# heads do all the work.
+#
+# **Round 12 fix: add `--w-side-time` — time-domain L1 on the side
+# signal**, `|side_pred − side_ref|.mean()`. Sign-preserving:
+#
+#   stereo_side_time_l1 at mono pred:
+#     loss value:      0.17
+#     gradient norm:   1.6e-3  (non-zero!)
+#     direction:       where side_ref > 0, gradient on L is negative
+#                      → SGD pushes L *up* (toward correct sign)
+#                      where side_ref < 0, vice versa
+#
+# Per-sample gradient. The model now has a directional signal to break
+# the mono symmetry. MSS magnitude (kept at w=2.0) supervises the
+# *magnitude / per-band spectrum* of the panning; the new time-domain
+# L1 supervises the *sign*. Complementary, both used together.
+#
+# Audition feedback also noted: EMA sounded worse than best.pt (levels
+# slightly off). Confirms EMA's main benefit (smoothing over oscillation)
+# is most valuable AFTER a model has converged; round 11_2 was still
+# learning, so the EMA-smoothed weights blend pre-convergence states.
+# Keep EMA enabled for posterity but ship the best.pt artifact from now.
+#
+# **Round 12 changes (vs round 11_2):**
+#   - **NEW: `w_side_time = 2.0`** — the sign-preserving time-domain
+#     side L1. Pairs with `w_stereo_side=2.0` (magnitude). Same scale.
+#   - Everything else unchanged from round 11_2: alternate-datasets,
+#     ema-decay 0.999, val_batches 16, w_imbalance=2.0, w_width=0,
+#     w_pan_mean=0, w_stereo_side=2.0, w_loud=0.2, w_log_mel=0.5,
+#     w_identity_prior=5e-3, B=4 + grad-accum 2, lr 1e-5, 6000 steps.
+#
+# Warm-start: round 11_2's best.pt (step 1249, val 2.14). User feedback
+# noted timbre/dynamics were improving in that ckpt, so the foundation
+# is solid; we just need to unbreak panning.
+
+[run]
+name = "v6.2-round12"
+
+[hardware]
+ram_floor_gb = 8
+pytorch_cuda_alloc_conf = "expandable_segments:True"
+
+[train]
+init_from = "dmc-data/checkpoints/v6.2-round11_2/mix_encoder_best.pt"
+shard_dirs = ["dmc-data/stage3_cambridge_8s", "dmc-data/stage3_slakh_8s"]
+alternate_datasets = true
+ema_decay = 0.999
+n_max = 42
+num_workers = 2
+val_num_workers = 0
+shuffle_buffer = 32
+min_track_rms_dbfs = -45.0
+steps = 6000
+warmup_steps = 200
+batch_size = 4
+grad_accum_steps = 2
+lr = 1e-5
+trim_max_db = 18.0
+loudness_target_dbfs = -15.0
+cuda_memory_fraction = 0.75
+ckpt_every = 500
+val_every = 250
+val_batches = 16
+w_loud = 0.2
+w_stereo_side = 2.0
+w_side_time = 2.0
+w_imbalance = 2.0
+w_width = 0.0
+w_pan_mean = 0.0
+w_identity_prior = 0.005
