@@ -320,6 +320,93 @@ def _val_loss_pass(
     return {k: (sum(v) / max(len(v), 1)) for k, v in accum.items()}
 
 
+def _format_preview_params_md(
+    strip_phys: torch.Tensor,            # (N_max, 22) denormalized
+    bus_phys: torch.Tensor,              # (13,) denormalized
+    trim_db: float,
+    mask: torch.Tensor,                  # (N_max,) bool
+    *,
+    threshold_offset_db: Optional[torch.Tensor] = None,  # (N_max,) — RMS-relative
+    session: str = "?",
+    stage: str = "?",
+) -> str:
+    """Format one preview example's predicted params as Markdown for `tb.add_text`.
+
+    Mirrors the per-track and bus param layout the model produces. Per-track
+    threshold is shown as the *RMS-relative offset* the encoder actually
+    controls (when `--no-rms-relative-threshold` is not set) — the absolute
+    threshold = `track_rms_db + offset`. Pan is renormalized to [-1, +1].
+    """
+    keys = STRIP_PARAM_KEYS
+    def k(name): return keys.index(name)
+    n_active = int(mask.sum().item())
+
+    lines = [
+        f"### {stage}: {session}",
+        "",
+        f"**trim = {trim_db:+.2f} dB** | active tracks: {n_active}",
+        "",
+        "| # | gain | HPF | LS (f / g / Q) | P1 (f / g / Q) | P2 (f / g / Q) | "
+        "HS (f / g / Q) | LPF | comp (thr / ratio / atk / rel) | clip (drv / mix) | pan |",
+        "|---|------|-----|----------------|----------------|----------------|"
+        "----------------|-----|--------------------------------|------------------|-----|",
+    ]
+    for i in range(n_active):
+        p = strip_phys[i]
+        gain = p[k("gain_db")].item()
+        hpf  = p[k("hpf_freq")].item()
+        lsF, lsG, lsQ = p[k("ls_freq")].item(), p[k("ls_gain")].item(), p[k("ls_q")].item()
+        p1F, p1G, p1Q = p[k("p1_freq")].item(), p[k("p1_gain")].item(), p[k("p1_q")].item()
+        p2F, p2G, p2Q = p[k("p2_freq")].item(), p[k("p2_gain")].item(), p[k("p2_q")].item()
+        hsF, hsG, hsQ = p[k("hs_freq")].item(), p[k("hs_gain")].item(), p[k("hs_q")].item()
+        lpf  = p[k("lpf_freq")].item()
+        if threshold_offset_db is not None:
+            thr_str = f"{threshold_offset_db[i].item():+.1f} dB (rel)"
+        else:
+            thr_str = f"{p[k('threshold_db')].item():+.1f} dB"
+        ratio = p[k("ratio")].item()
+        atk   = p[k("attack_ms")].item()
+        rel   = p[k("release_ms")].item()
+        drv   = p[k("clip_drive_db")].item()
+        cmix  = p[k("clip_mix")].item()
+        pan_phys = 2.0 * p[k("pan")].item() - 1.0   # [0,1] → [-1, +1]
+
+        lines.append(
+            f"| {i} | {gain:+5.1f} dB | {hpf:.0f} Hz | "
+            f"{lsF:.0f} / {lsG:+.1f} / Q{lsQ:.1f} | "
+            f"{p1F:.0f} / {p1G:+.1f} / Q{p1Q:.1f} | "
+            f"{p2F:.0f} / {p2G:+.1f} / Q{p2Q:.1f} | "
+            f"{hsF:.0f} / {hsG:+.1f} / Q{hsQ:.1f} | "
+            f"{lpf:.0f} Hz | "
+            f"{thr_str} / {ratio:.1f}:1 / {atk:.0f} / {rel:.0f} ms | "
+            f"{drv:+.1f} dB / {cmix*100:.0f}% | "
+            f"{pan_phys:+.2f} |"
+        )
+
+    lines += ["", "### Master bus", ""]
+    b = bus_phys
+    bk = BUS_PARAM_KEYS
+    def bi(name): return bk.index(name)
+    lines.append(
+        f"- **EQ:** "
+        f"low_boost {b[bi('bus_low_boost_freq')].item():.0f} Hz / "
+        f"{b[bi('bus_low_boost_gain')].item():+.1f} dB | "
+        f"low_attn {b[bi('bus_low_attn_freq')].item():.0f} Hz / "
+        f"{b[bi('bus_low_attn_gain')].item():+.1f} dB | "
+        f"mid {b[bi('bus_mid_freq')].item():.0f} Hz / "
+        f"{b[bi('bus_mid_gain')].item():+.1f} dB / Q{b[bi('bus_mid_q')].item():.1f} | "
+        f"air {b[bi('bus_air_freq')].item():.0f} Hz / "
+        f"{b[bi('bus_air_gain')].item():+.1f} dB"
+    )
+    lines.append(
+        f"- **comp:** {b[bi('bus_threshold_db')].item():+.1f} dB / "
+        f"{b[bi('bus_ratio')].item():.1f}:1 / "
+        f"atk {b[bi('bus_attack_ms')].item():.0f} ms / "
+        f"rel {b[bi('bus_release_ms')].item():.0f} ms"
+    )
+    return "\n".join(lines)
+
+
 def _val_audio_pass(
     encoder, mix_graph, preview_batch: dict,
     tables: dict, device: torch.device,
@@ -331,6 +418,11 @@ def _val_audio_pass(
     The preview_batch is loaded once at startup and reused across every
     validation pass — so the audio in TB shows the SAME songs improving over
     training steps.
+
+    Each returned sample also includes the per-track + bus + trim predicted
+    params (denormalized, plus the RMS-relative threshold offset when
+    `use_rms_relative_threshold=True`) so the caller can log a Markdown
+    summary via `tb.add_text` alongside the audio.
     """
     encoder.eval()
     samples: list[dict] = []
@@ -351,6 +443,21 @@ def _val_audio_pass(
         mask_4d = track_mask.float().view(*track_mask.shape, 1, 1)
         sum_mix = (tracks * mask_4d).sum(dim=1)
 
+        # Denormalize predicted params for the param-summary markdown.
+        strip_phys = _denorm(out["track_params"].float(), tables["strip"]).cpu()  # (B, N_max, 22)
+        bus_phys   = _denorm(out["bus_params"].float(),   tables["bus"]  ).cpu()  # (B, 13)
+        trim_db_b  = out["trim_db"].float().cpu()                                  # (B,)
+        track_mask_cpu = track_mask.cpu()                                          # (B, N_max)
+
+        # RMS-relative threshold offset (the actual "knob" the encoder controls
+        # when use_rms_relative_threshold=True). Same mapping as _render_full_mix:
+        #   raw_norm ∈ [0,1]  →  offset_db = -30 + raw_norm * 36   ∈ [-30, +6]
+        threshold_offset_cpu: Optional[torch.Tensor] = None
+        if use_rms_relative_threshold:
+            thr_idx = STRIP_PARAM_KEYS.index("threshold_db")
+            thr_norm = out["track_params"][..., thr_idx].float().clamp(0, 1)
+            threshold_offset_cpu = (-30.0 + thr_norm * 36.0).cpu()                 # (B, N_max)
+
         n = min(max_examples, pred_mix.shape[0])
         for i in range(n):
             samples.append({
@@ -359,6 +466,13 @@ def _val_audio_pass(
                 "sum_mix":  sum_mix[i].detach().cpu(),
                 "session":  preview_batch["meta"][i].get("session", "?"),
                 "stage":    preview_batch["meta"][i].get("stage", "?"),
+                "strip_phys": strip_phys[i],
+                "bus_phys":   bus_phys[i],
+                "trim_db":    trim_db_b[i].item(),
+                "track_mask": track_mask_cpu[i],
+                "threshold_offset_db": (
+                    threshold_offset_cpu[i] if threshold_offset_cpu is not None else None
+                ),
             })
     encoder.train()
     return samples
@@ -1132,6 +1246,16 @@ def main() -> int:
                 tb.add_image(f"specgram/preview_{i}/pred", _log_mel_image(pred, SAMPLE_RATE), step)
                 tb.add_image(f"specgram/preview_{i}/ref",  _log_mel_image(ref,  SAMPLE_RATE), step)
                 tb.add_image(f"specgram/preview_{i}/sum",  _log_mel_image(sum_, SAMPLE_RATE), step)
+                # Predicted per-track + bus + trim params as a markdown table
+                # for the TB Text tab. Keeps the params view in sync with the
+                # audio at every val pass.
+                params_md = _format_preview_params_md(
+                    sample["strip_phys"], sample["bus_phys"], sample["trim_db"],
+                    sample["track_mask"],
+                    threshold_offset_db=sample["threshold_offset_db"],
+                    session=sample["session"], stage=sample["stage"],
+                )
+                tb.add_text(f"params/preview_{i}", params_md, step)
             tb.flush()
 
         if (step + 1) % args.ckpt_every == 0 or step + 1 == args.steps:
