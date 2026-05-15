@@ -111,7 +111,7 @@ def grafx_param_huber_loss(
     n_groups_per_example: torch.Tensor, # (B,) long — # of valid groups per example
     label_example_mask: torch.Tensor,  # (B,) bool — True for labeled examples
     *,
-    delta: float = 0.1,
+    delta: float = 1.0,
     param_weights: Optional[dict[str, float]] = None,
 ) -> dict[str, torch.Tensor]:
     """Huber MSE between predicted and label params for strip + group.
@@ -123,10 +123,13 @@ def grafx_param_huber_loss(
         `n_groups_per_example` (only groups < n_groups[b] count) AND
         `label_example_mask`.
 
-    `delta` is Huber's quadratic→linear threshold. 0.1 in normalized
-    log-magnitude units corresponds roughly to ~0.4 dB / ±10 % gain;
-    errors larger than that get linear gradient (robust to outliers,
-    avoids the saturation collapse we hit with raw MSE in round 14).
+    `delta` is Huber's quadratic→linear threshold. At delta=1.0 the loss
+    is effectively MSE for typical label magnitudes (most params live in
+    [-2, +3] log-units) — the linear branch only kicks in for pathological
+    outliers. Smaller deltas clip the gradient at ±delta in the linear
+    region, which strangles convergence during overfit; round-14's MSE
+    collapse came from sigmoid saturation in the old heads, and the new
+    heads are pure Linear so that failure mode doesn't apply.
 
     Returns dict for logging:
       { "L_param/strip": ..., "L_param/group": ..., "L_param/total": ... }
