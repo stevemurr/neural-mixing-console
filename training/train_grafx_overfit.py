@@ -259,7 +259,7 @@ def main() -> int:
 
         optimizer.zero_grad(set_to_none=True)
         L_total.backward()
-        torch.nn.utils.clip_grad_norm_(encoder.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(encoder.parameters(), max_norm=10.0)
         optimizer.step()
 
         # Log

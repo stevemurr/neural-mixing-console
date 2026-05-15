@@ -143,9 +143,18 @@ def grafx_param_huber_loss(
     # Combined mask: (B, N_max) — True where there's both an example label
     # and a per-track filename match.
     strip_mask = (label_track_mask & label_example_mask.unsqueeze(-1)).to(torch.float32)
-    strip_denom = strip_mask.sum().clamp(min=1.0) * N_max     # rough normalization factor
-    # ^ multiplying by N_max keeps strip + group losses on comparable scale
-    #   regardless of how many tracks are masked in. (See per-param avg below.)
+
+    # Normalization: SUM over tracks, MEAN over batch. Each active track
+    # contributes its full per-shape-averaged loss to the total — i.e.
+    # gradient per per-track output element is 1/B regardless of how many
+    # sibling tracks are active. Previous "/ strip_mask.sum()" divided by
+    # the active-track count (~32 for AMContra), which made per-track
+    # gradient ~6× weaker than per-group (active-groups ~5), and let the
+    # group bus memorize ~6× faster than the strip during overfit. The
+    # loss VALUE now scales linearly with active-track count; that's a
+    # logging concern, not a training one (we also log /strip and /group
+    # separately so monitoring stays interpretable).
+    strip_denom = float(B)
 
     l_strip_total = torch.zeros((), device=device)
     for proc, pp in pred_strip.items():
@@ -157,7 +166,7 @@ def grafx_param_huber_loss(
             per_elem = F.huber_loss(pred_t, target_t, reduction="none", delta=delta)
             # average across the param's shape dims (everything past N)
             per_track = per_elem.flatten(start_dim=2).mean(dim=-1)   # (B, N_max)
-            l_strip_total = l_strip_total + proc_w * (per_track * strip_mask).sum() / strip_mask.sum().clamp(min=1.0)
+            l_strip_total = l_strip_total + proc_w * (per_track * strip_mask).sum() / strip_denom
 
     # --- Per-group bus Huber ---
     # Group mask: 1.0 where the group index < n_groups[b], 0 otherwise.
@@ -166,6 +175,7 @@ def grafx_param_huber_loss(
     group_mask = (group_idx_range < n_groups_per_example.unsqueeze(-1)).to(torch.float32)
     group_mask = group_mask * label_example_mask.unsqueeze(-1).to(torch.float32)
     # ^ (B, max_groups)
+    group_denom = float(B)   # symmetric with strip; sum over groups, mean over batch
 
     l_group_total = torch.zeros((), device=device)
     for proc, pp in pred_group.items():
@@ -174,7 +184,7 @@ def grafx_param_huber_loss(
             target_t = label_group[proc][param_name].to(pred_t.device)
             per_elem = F.huber_loss(pred_t, target_t, reduction="none", delta=delta)
             per_group = per_elem.flatten(start_dim=2).mean(dim=-1)            # (B, max_g)
-            l_group_total = l_group_total + proc_w * (per_group * group_mask).sum() / group_mask.sum().clamp(min=1.0)
+            l_group_total = l_group_total + proc_w * (per_group * group_mask).sum() / group_denom
 
     return {
         "L_param/strip": l_strip_total,
