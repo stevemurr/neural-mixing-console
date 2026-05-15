@@ -259,7 +259,13 @@ def main() -> int:
 
         optimizer.zero_grad(set_to_none=True)
         L_total.backward()
-        torch.nn.utils.clip_grad_norm_(encoder.parameters(), max_norm=10.0)
+        # Compute grad norm (for logging only) without clipping. For this
+        # single-song overfit there are no outlier batches that would
+        # justify clipping — Adam already absorbs gradient-magnitude
+        # differences via per-param EMA variance, and the higher-magnitude
+        # L_param (post-/B normalization) was being chopped by the old
+        # clip=10. For multi-song production training, restore a clip.
+        grad_norm = torch.nn.utils.clip_grad_norm_(encoder.parameters(), max_norm=float("inf"))
         optimizer.step()
 
         # Log
@@ -271,12 +277,14 @@ def main() -> int:
             tb.add_scalar("train/L_recon/full",  L_recon["match/full"].item(),  step)
             tb.add_scalar("train/L_recon/sum",   L_recon["match/sum"].item(),   step)
             tb.add_scalar("train/L_recon/diff",  L_recon["match/diff"].item(),  step)
+            tb.add_scalar("train/grad_norm",     grad_norm.item(),              step)
             elapsed = time.time() - t0
             logging.info(
                 f"step {step:5d}/{args.steps}  "
                 f"L_total={L_total.item():7.4f}  "
                 f"L_param={L_param['L_param/total'].item():6.3f}  "
                 f"L_recon={L_recon['match/full'].item():6.3f}  "
+                f"grad={grad_norm.item():7.2f}  "
                 f"({elapsed/(step+1):.2f}s/step)"
             )
 
