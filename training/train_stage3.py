@@ -58,6 +58,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from models.diff_eq import eq_cascade_log10_magnitude
 from models.diff_mixing_graph import DiffMixingGraph
 from models.diff_strip import compute_track_rms_db
 from models.encoders import MixEncoder
@@ -66,8 +67,9 @@ from models.encoder_priors import (
 )
 from reference.param_norm import PARAM_RANGES
 from training.data import (
-    BUS_PARAM_KEYS, STRIP_PARAM_KEYS,
-    collate_stage3, make_stage3_dataset,
+    BUS_PARAM_KEYS, EQ_PARAM_KEYS, STRIP_PARAM_KEYS,
+    collate_stage3, compute_lsq_eq_target, compute_lsq_track_targets,
+    make_stage3_dataset,
 )
 from training.losses import decoupled_recon_loss, pan_mean_penalty
 
@@ -220,6 +222,10 @@ def _val_loss_pass(
     w_side_time: float = 0.0,
     w_imbalance: float = 0.0, w_width: float = 0.0,
     w_pan_target: float = 0.0,
+    w_gain_target: float = 0.0,
+    w_eq_target: float = 0.0,
+    strip_table: dict | None = None,
+    sample_rate: int = 48_000,
     loudness_target_dbfs: float | None = None,
 ) -> dict[str, float]:
     """Average losses over `val_batches` random validation batches."""
@@ -239,6 +245,10 @@ def _val_loss_pass(
         accum["L_width"] = []
     if w_pan_target > 0:
         accum["L_pan_target"] = []
+    if w_gain_target > 0:
+        accum["L_gain_target"] = []
+    if w_eq_target > 0:
+        accum["L_eq_target"] = []
     with torch.no_grad():
         for _ in range(val_batches):
             try:
@@ -263,13 +273,46 @@ def _val_loss_pass(
                     w_imbalance=w_imbalance, w_width=w_width,
                     loudness_target_dbfs=loudness_target_dbfs,
                 )
-                if w_pan_target > 0.0 and "pan_target" in batch:
-                    pan_idx = STRIP_PARAM_KEYS.index("pan")
-                    pan_pred = 2.0 * out["track_params"][..., pan_idx].float() - 1.0
-                    pan_tgt = batch["pan_target"].to(device, non_blocking=True).float()
+                if w_pan_target > 0.0 or w_gain_target > 0.0:
+                    tgt = compute_lsq_track_targets(
+                        tracks.float(), ref_mix.float(), track_mask=track_mask,
+                    )
                     m = track_mask.float()
-                    diff_sq = (pan_pred - pan_tgt).pow(2) * m
-                    rec["L_pan_target"] = diff_sq.sum() / m.sum().clamp(min=1.0)
+                    denom = m.sum().clamp(min=1.0)
+                    if w_pan_target > 0.0:
+                        pan_idx = STRIP_PARAM_KEYS.index("pan")
+                        pan_pred = 2.0 * out["track_params"][..., pan_idx].float() - 1.0
+                        rec["L_pan_target"] = ((pan_pred - tgt["pan"]).pow(2) * m).sum() / denom
+                    if w_gain_target > 0.0 and strip_table is not None:
+                        gain_idx = STRIP_PARAM_KEYS.index("gain_db")
+                        lo = strip_table["lo"][gain_idx]
+                        hi = strip_table["hi"][gain_idx]
+                        gain_pred_norm = out["track_params"][..., gain_idx].float()
+                        gain_tgt_db = tgt["gain_db"].clamp(min=lo.item(), max=hi.item())
+                        gain_tgt_norm = (gain_tgt_db - lo) / (hi - lo + 1e-9)
+                        rec["L_gain_target"] = ((gain_pred_norm - gain_tgt_norm).pow(2) * m).sum() / denom
+                if w_eq_target > 0.0 and strip_table is not None:
+                    eq_tgt = compute_lsq_eq_target(
+                        tracks.float(), ref_mix.float(), track_mask=track_mask,
+                        sample_rate=sample_rate,
+                    )
+                    band_centers = eq_tgt["band_centers_hz"]
+                    band_energy = eq_tgt["band_energy"]
+                    target_log10 = eq_tgt["eq_log10_centered"]
+                    strip_phys = _denorm(out["track_params"].float(), strip_table)
+                    eq_params = {k: strip_phys[..., STRIP_PARAM_KEYS.index(k)]
+                                 for k in EQ_PARAM_KEYS}
+                    pred_log10 = eq_cascade_log10_magnitude(
+                        eq_params, band_centers, sample_rate=sample_rate,
+                    )
+                    pred_log10_centered = pred_log10 - pred_log10.mean(dim=-1, keepdim=True)
+                    w_band = band_energy / (
+                        band_energy.sum(dim=-1, keepdim=True).clamp(min=1e-9)
+                    )
+                    diff_sq = (pred_log10_centered - target_log10).pow(2)
+                    m_track = track_mask.float()
+                    per_track = (diff_sq * w_band).sum(dim=-1)
+                    rec["L_eq_target"] = (per_track * m_track).sum() / m_track.sum().clamp(min=1.0)
             for k in accum:
                 if k in rec:
                     accum[k].append(rec[k].item())
@@ -532,15 +575,42 @@ def main() -> int:
     ap.add_argument("--w-pan-target", type=float, default=0.0,
                     help="weight on per-track PAN target supervision (MSE on predicted "
                          "pan vs LSQ-fit pan target from (ref_mix, raw_stem) — see "
-                         "`collate_stage3(compute_pan_target=True)`). Direct pointwise "
-                         "supervision on the pan parameter from the data — the ratio "
-                         "of L vs R dot products tells us exactly how much of each "
-                         "stem the engineer routed to each channel. Bypasses the "
-                         "indirect side-loss / SI gradient path entirely. 5.0 "
-                         "recommended; pair with `w_stereo_side=0`, `w_side_time=0`, "
+                         "`compute_lsq_track_targets()`). Direct pointwise supervision "
+                         "on the pan parameter from the data — the ratio of L vs R "
+                         "dot products tells us exactly how much of each stem the "
+                         "engineer routed to each channel. Bypasses the indirect "
+                         "side-loss / SI gradient path entirely. 5.0 recommended; "
+                         "pair with `w_stereo_side=0`, `w_side_time=0`, "
                          "`w_imbalance=0` (the audio-domain stereo losses become "
-                         "redundant once per-track pan is directly supervised). 0 "
-                         "disables (also disables the LSQ computation in the collate).")
+                         "redundant once per-track pan is directly supervised). "
+                         "0 disables (also disables the LSQ in the train loop).")
+    ap.add_argument("--w-gain-target", type=float, default=0.0,
+                    help="weight on per-track GAIN target supervision (MSE in "
+                         "normalized [0,1] space on predicted gain_db vs LSQ-fit "
+                         "gain target from the same per-channel fit as the pan "
+                         "target — see `compute_lsq_track_targets()`). The fit "
+                         "gives the engineer's effective combined-channel gain "
+                         "for free; this loss closes the loop on the absolute "
+                         "scale that the pan ratio drops out of. Noisier than the "
+                         "pan target (heavy comp / EQ inflate the LSQ estimate "
+                         "above the engineer's gain knob), but still a much more "
+                         "direct signal than the global L_recon. 2.0 recommended "
+                         "to start (smaller than w_pan_target because the target "
+                         "is noisier). 0 disables.")
+    ap.add_argument("--w-eq-target", type=float, default=0.0,
+                    help="weight on per-track EQ-SHAPE target supervision (MSE "
+                         "in mean-centered log10-magnitude across 16 log-spaced "
+                         "bands 50 Hz – 16 kHz, see `compute_lsq_eq_target()`). "
+                         "Same family as pan/gain targets: per-frequency spectral "
+                         "LSQ fit recovers the engineer's effective EQ magnitude "
+                         "response per stem; mean-centering removes the gain "
+                         "(separately supervised). MSE weighted by per-band stem "
+                         "energy for coherence (silent bands of a stem add no "
+                         "signal). Closed-form `eq_cascade_log10_magnitude()` "
+                         "computes the predicted EQ at the same band centers. "
+                         "2.0 recommended; pair with w_identity_prior=0 (the "
+                         "prior is redundant once a real EQ target is in play). "
+                         "0 disables.")
     ap.add_argument("--w-identity-prior", type=float, default=0.0,
                     help="weight on an L2 penalty pulling predicted params toward the "
                          "engineer-default values (encoder_priors.STRIP_DEFAULTS / "
@@ -612,7 +682,8 @@ def main() -> int:
           f"w_loud={args.w_loud} w_stereo_side={args.w_stereo_side} "
           f"w_side_time={args.w_side_time} "
           f"w_imbalance={args.w_imbalance} w_width={args.w_width} "
-          f"w_pan_target={args.w_pan_target} "
+          f"w_pan_target={args.w_pan_target} w_gain_target={args.w_gain_target} "
+          f"w_eq_target={args.w_eq_target} "
           f"w_identity_prior={args.w_identity_prior} w_pan_mean={args.w_pan_mean}")
     print(f"  alternate_datasets: {args.alternate_datasets}  ema_decay: {args.ema_decay}")
 
@@ -671,8 +742,7 @@ def main() -> int:
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, num_workers=args.num_workers,
         collate_fn=lambda b: collate_stage3(b, n_max=args.n_max, mert_dim=MERT_DIM,
-                                            min_track_rms_dbfs=args.min_track_rms_dbfs,
-                                            compute_pan_target=args.w_pan_target > 0.0),
+                                            min_track_rms_dbfs=args.min_track_rms_dbfs),
         drop_last=True, **train_loader_kwargs,
     )
 
@@ -685,8 +755,7 @@ def main() -> int:
     val_loader = DataLoader(
         val_ds, batch_size=args.batch_size, num_workers=args.val_num_workers,
         collate_fn=lambda b: collate_stage3(b, n_max=args.n_max, mert_dim=MERT_DIM,
-                                            min_track_rms_dbfs=args.min_track_rms_dbfs,
-                                            compute_pan_target=args.w_pan_target > 0.0),
+                                            min_track_rms_dbfs=args.min_track_rms_dbfs),
         drop_last=True,
     )
     val_iter = iter(val_loader)
@@ -869,20 +938,81 @@ def main() -> int:
             l_total = l_total + args.w_pan_mean * l_pan
             window_losses.setdefault("L_pan_mean", []).append(l_pan.item())
 
-        # Per-track pan target supervision — MSE on predicted pan vs the
-        # LSQ-fit pan target from the collate. Direct pointwise gradient on
-        # each pan param: ~95 % of stems get a clean target; rare heavily-
-        # processed ones contribute noise the optimizer averages over.
-        if args.w_pan_target > 0.0 and "pan_target" in batch:
+        # Per-track LSQ targets — pan and (optionally) gain from the same
+        # per-channel fit against the reference mix. Direct pointwise
+        # gradient on each per-track param: ~95 % of stems get a clean
+        # target; heavily-processed ones contribute noise the optimizer
+        # averages over. The LSQ runs on GPU in the main process (not the
+        # collate / workers — worker-side intermediates ~258 MB / batch
+        # caused OOM in round 13 attempt 1).
+        if args.w_pan_target > 0.0 or args.w_gain_target > 0.0:
             with torch.amp.autocast("cuda", enabled=False):
-                pan_idx = STRIP_PARAM_KEYS.index("pan")
-                pan_pred = 2.0 * out["track_params"][..., pan_idx].float() - 1.0  # (B, N)
-                pan_tgt = batch["pan_target"].to(device, non_blocking=True).float()
+                tgt = compute_lsq_track_targets(
+                    tracks.float(), ref_mix.float(), track_mask=track_mask,
+                )
                 m = track_mask.float()
-                diff_sq = (pan_pred - pan_tgt).pow(2) * m
-                l_pan_target = diff_sq.sum() / m.sum().clamp(min=1.0)
-            l_total = l_total + args.w_pan_target * l_pan_target
-            window_losses.setdefault("L_pan_target", []).append(l_pan_target.item())
+                denom = m.sum().clamp(min=1.0)
+
+                if args.w_pan_target > 0.0:
+                    pan_idx = STRIP_PARAM_KEYS.index("pan")
+                    pan_pred = 2.0 * out["track_params"][..., pan_idx].float() - 1.0
+                    l_pan_target = ((pan_pred - tgt["pan"].detach()).pow(2) * m).sum() / denom
+                    l_total = l_total + args.w_pan_target * l_pan_target
+                    window_losses.setdefault("L_pan_target", []).append(l_pan_target.item())
+
+                if args.w_gain_target > 0.0:
+                    # MSE in NORMALIZED [0, 1] space: clamp the dB target
+                    # into the strip's gain_db range, normalize linearly
+                    # (gain_db is a linear-scale param per PARAM_RANGES),
+                    # then MSE against the encoder's raw [0,1] output.
+                    gain_idx = STRIP_PARAM_KEYS.index("gain_db")
+                    lo = tables["strip"]["lo"][gain_idx]
+                    hi = tables["strip"]["hi"][gain_idx]
+                    gain_pred_norm = out["track_params"][..., gain_idx].float()  # (B, N) ∈ [0,1]
+                    gain_tgt_db = tgt["gain_db"].detach().clamp(min=lo.item(), max=hi.item())
+                    gain_tgt_norm = (gain_tgt_db - lo) / (hi - lo + 1e-9)
+                    l_gain_target = ((gain_pred_norm - gain_tgt_norm).pow(2) * m).sum() / denom
+                    l_total = l_total + args.w_gain_target * l_gain_target
+                    window_losses.setdefault("L_gain_target", []).append(l_gain_target.item())
+
+        # Per-track EQ-shape target. Spectral LSQ on stems vs ref gives an
+        # effective magnitude response per stem; mean-centered across bands
+        # to remove the gain (separately supervised). Predicted EQ cascade
+        # magnitude is closed-form from the denormalized strip params.
+        if args.w_eq_target > 0.0:
+            with torch.amp.autocast("cuda", enabled=False):
+                eq_tgt = compute_lsq_eq_target(
+                    tracks.float(), ref_mix.float(), track_mask=track_mask,
+                    sample_rate=SAMPLE_RATE,
+                )
+                band_centers = eq_tgt["band_centers_hz"]                # (K,)
+                band_energy = eq_tgt["band_energy"].detach()             # (B, N, K)
+                target_log10 = eq_tgt["eq_log10_centered"].detach()      # (B, N, K)
+
+                # Encoder's EQ — denormalized to physical units, then
+                # evaluated at the band centers.
+                strip_phys = _denorm(out["track_params"].float(), tables["strip"])
+                eq_params = {k: strip_phys[..., STRIP_PARAM_KEYS.index(k)]
+                             for k in EQ_PARAM_KEYS}
+                pred_log10 = eq_cascade_log10_magnitude(
+                    eq_params, band_centers, sample_rate=SAMPLE_RATE,
+                )  # (B, N, K)
+                pred_log10_centered = pred_log10 - pred_log10.mean(dim=-1, keepdim=True)
+
+                # MSE weighted by per-band stem energy (coherence) and the
+                # active-track mask. Normalize the energy weights per (B, N)
+                # so each active track contributes ~equally regardless of
+                # absolute loudness.
+                w_band = band_energy / (
+                    band_energy.sum(dim=-1, keepdim=True).clamp(min=1e-9)
+                )  # (B, N, K), per-track normalized energy weights
+                diff_sq = (pred_log10_centered - target_log10).pow(2)  # (B, N, K)
+                m_track = track_mask.float()                            # (B, N)
+                # Weighted by band energy, masked by active tracks.
+                per_track = (diff_sq * w_band).sum(dim=-1)              # (B, N)
+                l_eq_target = (per_track * m_track).sum() / m_track.sum().clamp(min=1.0)
+            l_total = l_total + args.w_eq_target * l_eq_target
+            window_losses.setdefault("L_eq_target", []).append(l_eq_target.item())
 
         # Identity prior: smooth L2 pulling params toward the engineer-default
         # values. Replaces the old bypass-consistency BCE — no discrete
@@ -964,6 +1094,10 @@ def main() -> int:
                 w_side_time=args.w_side_time,
                 w_imbalance=args.w_imbalance, w_width=args.w_width,
                 w_pan_target=args.w_pan_target,
+                w_gain_target=args.w_gain_target,
+                w_eq_target=args.w_eq_target,
+                strip_table=tables["strip"],
+                sample_rate=SAMPLE_RATE,
                 w_loud=args.w_loud, w_log_mel=args.w_log_mel,
                 loudness_target_dbfs=args.loudness_target_dbfs,
             )

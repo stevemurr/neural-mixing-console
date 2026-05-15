@@ -1,4 +1,4 @@
-# Stage 3 v6.2 — round 13. Per-track pan supervision via LSQ teacher.
+# Stage 3 v6.2 — round 13. Per-track LSQ teachers: pan + gain + EQ.
 #
 # Round 12 added `--w-side-time` (time-domain L1 on the side channel) to
 # fix the |0| singular-point trap in the magnitude-MSS side loss. That
@@ -36,16 +36,35 @@
 # potentially fighting). If round 13 works, the audio-domain stereo
 # terms are obsolete; if it doesn't, we re-enable selectively.
 #
-# **Round 13 changes (vs round 12):**
-#   - **NEW `--w-pan-target 5.0`** — direct MSE on (pan_pred, pan_lsq).
-#     5x because the term is small in magnitude (per-track MSE in
-#     [-1,+1] space, masked over active tracks); 5.0 brings the
-#     contribution into the same order as the recon losses.
-#   - `w_stereo_side`, `w_side_time`, `w_imbalance`, `w_pan_mean` all
-#     set to **0** (audio-domain stereo losses retired).
-#   - Everything else unchanged from round 12: alternate-datasets,
-#     ema-decay 0.999, val_batches 16, w_loud=0.2, w_log_mel=0.5,
-#     w_identity_prior=5e-3, B=4 + grad-accum 2, lr 1e-5, 6000 steps.
+# **Round 13 — three LSQ teachers from the same per-channel fit:**
+#
+#   1. **`--w-pan-target 5.0`** — MSE on (pan_pred, pan_lsq) per active
+#      track. Sign convention: −1 = full L, +1 = full R.
+#   2. **`--w-gain-target 2.0`** — MSE in normalized [0,1] space on
+#      (gain_pred_db, gain_lsq_db). The fit gives the engineer's
+#      effective combined-channel gain for free; this closes the absolute
+#      scale that pan drops out of. Noisier than pan (heavy comp/EQ
+#      inflate the LSQ estimate above the engineer's gain knob); use a
+#      smaller weight.
+#   3. **`--w-eq-target 2.0`** — MSE in mean-centered log10-magnitude
+#      across 16 log-spaced bands (50 Hz – 16 kHz), spectral-LSQ teacher.
+#      Mean-centering removes the absolute gain (separately supervised).
+#      Per-band stem energy weights the MSE for coherence (silent bands
+#      add no signal). Closed-form `eq_cascade_log10_magnitude()` (in
+#      `models/diff_eq.py`) computes the predicted EQ at the same band
+#      centers. Smoke-tested vs synthetic peak EQ: max 0.05 dB error.
+#
+# **Audio-domain stereo losses all disabled** (w_stereo_side, w_side_time,
+# w_imbalance, w_pan_mean = 0). Per-track LSQ is the strongest signal we
+# can give; global mix-level stereo losses would just add noise on top.
+#
+# **`w_identity_prior = 0`** — the identity-prior L2 was a stabilizer for
+# the regime where we had no real per-track targets. Now we have three.
+# The prior would only fight the targets.
+#
+# Everything else unchanged from round 12: alternate-datasets, ema-decay
+# 0.999, val_batches 16, w_loud=0.2, w_log_mel=0.5, B=4 + grad-accum 2,
+# lr 1e-5, 6000 steps.
 #
 # Warm-start: round 11_2's best.pt (same as round 12 — apples-to-apples
 # comparison between "side_time fix" and "LSQ pan teacher").
@@ -85,4 +104,6 @@ w_imbalance = 0.0
 w_width = 0.0
 w_pan_mean = 0.0
 w_pan_target = 5.0
-w_identity_prior = 0.005
+w_gain_target = 2.0
+w_eq_target = 2.0
+w_identity_prior = 0.0

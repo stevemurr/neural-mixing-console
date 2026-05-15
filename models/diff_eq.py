@@ -121,6 +121,103 @@ def _peak_coeffs(fs: float, freq: torch.Tensor, gain_db: torch.Tensor, q: torch.
     return b, a
 
 
+# ---------- closed-form biquad magnitude (for the LSQ EQ-target loss) ----------
+
+def _biquad_mag_sq(
+    b: torch.Tensor, a: torch.Tensor, omega: torch.Tensor
+) -> torch.Tensor:
+    """|H(e^jω)|² = |B(e^jω)|² / |A(e^jω)|² for a single biquad.
+
+    Direct complex polynomial evaluation in float64, then magnitude-squared.
+    The analytic expansion `|P|² = p0² + p1² + p2² + 2(p0p1+p1p2)cos(ω) +
+    2 p0 p2 cos(2ω)` suffers catastrophic cancellation in float32 for filters
+    whose coefficients approach degeneracy at one end of the band (HPF near
+    ω = 0 has b ≈ [1, −2, 1], so the quadratic numerator zeroes out via
+    subtraction of similar-magnitude values — float32 throws away ~6
+    significant digits and the result can be wrong by orders of magnitude).
+    Complex evaluation in float64 keeps ~15 digits and is robust.
+
+    b, a:   (..., 3) coefficient tensors (a[..., 0] == 1 expected).
+    omega:  (K,) digital angular frequencies (= 2π·f/fs), 0 < ω < π.
+
+    Returns (..., K) real magnitude-squared response, in the input dtype of
+    `b` (float32 by default), broadcast over leading dims.
+    """
+    target_dtype = b.dtype
+    # Promote to float64 for the polynomial evaluation. complex128 has
+    # 15-16 significant decimal digits — plenty to absorb the ~6-digit
+    # cancellation that hits HPF / LPF near their pass-band edges.
+    b64 = b.to(torch.float64)
+    a64 = a.to(torch.float64)
+    omega64 = omega.to(torch.float64)
+    z_inv = torch.complex(torch.cos(omega64), -torch.sin(omega64))  # e^(-jω), (K,)
+    z_inv2 = z_inv * z_inv
+
+    b0 = b64[..., 0:1].to(torch.complex128)
+    b1 = b64[..., 1:2].to(torch.complex128)
+    b2 = b64[..., 2:3].to(torch.complex128)
+    a1 = a64[..., 1:2].to(torch.complex128)
+    a2 = a64[..., 2:3].to(torch.complex128)
+
+    B = b0 + b1 * z_inv + b2 * z_inv2
+    A = torch.ones_like(B) + a1 * z_inv + a2 * z_inv2
+    mag_sq = (B.real ** 2 + B.imag ** 2) / (A.real ** 2 + A.imag ** 2).clamp(min=1e-30)
+    return mag_sq.to(target_dtype)
+
+
+def eq_cascade_log10_magnitude(
+    strip_params: dict, freqs_hz: torch.Tensor, sample_rate: float = 48_000.0
+) -> torch.Tensor:
+    """log10|H_cascade(f)| of the 6-band strip EQ at K query frequencies.
+
+    Closed-form: each biquad contributes `0.5·log10(|H|²)`; the cascade
+    log-magnitude is the sum. Used by the round-13 per-track EQ-shape
+    teacher (training/data.py: `compute_lsq_eq_target`).
+
+    strip_params: dict of (..., 1) tensors with keys
+        hpf_freq, ls_freq, ls_gain, ls_q, p1_freq, p1_gain, p1_q,
+        p2_freq, p2_gain, p2_q, hs_freq, hs_gain, hs_q, lpf_freq.
+      Each tensor must broadcast over the leading batch/track dims.
+    freqs_hz: (K,) query frequencies in Hz.
+
+    Returns (..., K) log10-magnitude response.
+    """
+    omega = 2.0 * math.pi * freqs_hz.to(strip_params["hpf_freq"].device) / sample_rate
+
+    b, a = _hpf_coeffs(sample_rate, strip_params["hpf_freq"])
+    log_h2 = torch.log(_biquad_mag_sq(b, a, omega).clamp(min=1e-12))
+
+    b, a = _low_shelf_coeffs(
+        sample_rate, strip_params["ls_freq"],
+        strip_params["ls_gain"], strip_params["ls_q"],
+    )
+    log_h2 = log_h2 + torch.log(_biquad_mag_sq(b, a, omega).clamp(min=1e-12))
+
+    b, a = _peak_coeffs(
+        sample_rate, strip_params["p1_freq"],
+        strip_params["p1_gain"], strip_params["p1_q"],
+    )
+    log_h2 = log_h2 + torch.log(_biquad_mag_sq(b, a, omega).clamp(min=1e-12))
+
+    b, a = _peak_coeffs(
+        sample_rate, strip_params["p2_freq"],
+        strip_params["p2_gain"], strip_params["p2_q"],
+    )
+    log_h2 = log_h2 + torch.log(_biquad_mag_sq(b, a, omega).clamp(min=1e-12))
+
+    b, a = _high_shelf_coeffs(
+        sample_rate, strip_params["hs_freq"],
+        strip_params["hs_gain"], strip_params["hs_q"],
+    )
+    log_h2 = log_h2 + torch.log(_biquad_mag_sq(b, a, omega).clamp(min=1e-12))
+
+    b, a = _lpf_coeffs(sample_rate, strip_params["lpf_freq"])
+    log_h2 = log_h2 + torch.log(_biquad_mag_sq(b, a, omega).clamp(min=1e-12))
+
+    # log10|H| = 0.5 · log10|H|² = 0.5 · log_h2 / ln(10)
+    return 0.5 * log_h2 / math.log(10.0)
+
+
 # ---------- helpers ----------
 
 def _apply_biquad(x: torch.Tensor, b: torch.Tensor, a: torch.Tensor,

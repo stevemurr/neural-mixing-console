@@ -259,16 +259,13 @@ def make_stage3_dataset(
 
 
 def collate_stage3(batch: list[dict], n_max: int = 12, mert_dim: int = 768,
-                   min_track_rms_dbfs: float = float("-inf"),
-                   compute_pan_target: bool = False) -> dict:
+                   min_track_rms_dbfs: float = float("-inf")) -> dict:
     """Stack stage 3 bundles. Returns:
         tracks:           (B, N_max, 2, T)
         track_mask:       (B, N_max)
         mix:              (B, 2, T)
         mert_embeddings:  (B, N_max, mert_dim)  — zeros where missing
         meta:             list[dict]
-        pan_target?:      (B, N_max) ∈ [-1, +1] — per-track LSQ pan estimate,
-                                                  only when compute_pan_target=True
 
     `min_track_rms_dbfs`: if a track's segment-RMS is below this threshold,
     its `track_mask` slot is set to False so the encoder treats it as absent.
@@ -280,15 +277,14 @@ def collate_stage3(batch: list[dict], n_max: int = 12, mert_dim: int = 768,
     masked, the mask is NOT applied for that example (degenerate batch
     avoidance — the example is left intact and the trainer sees it normally).
 
-    `compute_pan_target`: when True, also fit a per-track pan-and-gain via
-    per-channel least squares against the reference mix:
-        g_L = ⟨ref_L, track_i_mono⟩ / ‖track_i_mono‖²
-        g_R = ⟨ref_R, track_i_mono⟩ / ‖track_i_mono‖²
-        pan_target_i = (g_R - g_L) / (g_R + g_L + eps)  ∈ [-1, +1]
-    Sign convention: -1 = full L, +1 = full R (matches our `stereo_imbalance`
-    convention). The estimate is robust to per-track EQ (the spectral scale
-    factor cancels in the ratio) but not to heavy non-linear processing —
-    good enough for ~95 % of stems; the model will average over the rest.
+    The per-track LSQ pan target is NOT computed here — it's a
+    `compute_pan_target(tracks, mix, mask)` helper that runs in the
+    *main* process on whatever device the trainer has chosen. Doing it
+    in the collate (which runs in worker subprocesses) caused
+    out-of-memory issues at production batch sizes: the intermediates
+    are sized `(B, N_max, T)` = ~258 MB per batch, and with
+    `num_workers × prefetch_factor` batches in flight the worker-side
+    RAM pressure pushed us past the watchdog floor in round 13 attempt 1.
     """
     B = len(batch)
     T = batch[0]["mix"].shape[-1]
@@ -334,31 +330,245 @@ def collate_stage3(batch: list[dict], n_max: int = 12, mert_dim: int = 768,
         mixes[bi] = mx
         metas.append(ex["meta"])
 
-    result = {
+    return {
         "tracks": tracks_padded, "track_mask": masks,
         "mix": mixes, "mert_embeddings": mert, "meta": metas,
     }
 
-    if compute_pan_target:
-        # Per-channel LSQ pan estimate. Mono raw stem against each ref channel.
-        # Operate on full-batch tensors — closed-form, vectorized over (B, N).
-        # Reduces along T (one dot product per (b, i, channel)).
-        tracks_mono = 0.5 * (tracks_padded[:, :, 0, :] + tracks_padded[:, :, 1, :])  # (B, N, T)
-        dot_L = (mixes[:, 0:1, :] * tracks_mono).sum(dim=-1)  # (B, N)
-        dot_R = (mixes[:, 1:2, :] * tracks_mono).sum(dim=-1)
-        # pan_target = (dot_R - dot_L) / (dot_R + dot_L + eps); track energy cancels
-        # in the ratio so we don't need to divide each dot by ‖track‖².
-        eps = 1e-9
-        pan_target = (dot_R - dot_L) / (dot_R + dot_L + eps)
-        pan_target = pan_target.clamp(-1.0, 1.0)
-        # Silent stems give a noisy ratio; fold them to 0 (center) explicitly.
-        stem_energy = (tracks_mono ** 2).sum(dim=-1)  # (B, N)
-        pan_target = torch.where(
-            stem_energy > 1e-9, pan_target, torch.zeros_like(pan_target)
-        )
-        result["pan_target"] = pan_target
 
-    return result
+def compute_lsq_track_targets(
+    tracks: torch.Tensor,
+    mix: torch.Tensor,
+    track_mask: Optional[torch.Tensor] = None,
+    *,
+    eps: float = 1e-9,
+    gain_floor_db: float = -60.0,
+) -> dict[str, torch.Tensor]:
+    """Per-track pan + gain targets via per-channel least-squares fit.
+
+    For each track i in the batch, find the scalar gain `g_c` that best
+    cancels `track_i_mono` from channel `c` of the reference mix:
+        g_c = ⟨ref_c, track_i_mono⟩ / ‖track_i_mono‖²
+    Two derived targets fall out of the same fit:
+
+      pan_target_i  = (g_R − g_L) / (g_R + g_L + eps)         ∈ [−1, +1]
+                      (gain-invariant — absolute scale cancels in ratio)
+      gain_target_i = 20·log10( √(g_L² + g_R²) )              dB
+                      (the engineer's effective combined-channel gain
+                       for this stem; clamped at `gain_floor_db` to keep
+                       silent/missing stems from producing −inf)
+
+    Sign convention: pan −1 = full L, +1 = full R (matches `stereo_imbalance`).
+
+    Run on GPU in the main process (post-collate, post-`.to(device)`).
+    Doing it in the collate caused OOM at production batch sizes:
+    intermediates are `(B, N_max, T)` ≈ 258 MB each and
+    `num_workers × prefetch_factor` multiplied the pressure across
+    worker processes.
+
+    Args:
+        tracks:        (B, N_max, 2, T) — padded raw stems, same as
+                       `collate_stage3()` output.
+        mix:           (B, 2, T) — reference mix.
+        track_mask:    (B, N_max) bool — masked-out slots get
+                       `pan = 0`, `gain_db = gain_floor_db`.
+        eps:           guard against div-by-zero on silent stems.
+        gain_floor_db: clamp for the gain target (silent stems otherwise
+                       produce −inf dB).
+
+    Returns dict with:
+        "pan":      (B, N_max) ∈ [−1, +1], clamped.
+        "gain_db":  (B, N_max) ∈ [gain_floor_db, +∞), clamped at the floor.
+    """
+    if tracks.dim() != 4 or tracks.shape[2] != 2:
+        raise ValueError(f"expected (B, N, 2, T) tracks; got {tracks.shape}")
+    if mix.dim() != 3 or mix.shape[1] != 2:
+        raise ValueError(f"expected (B, 2, T) mix; got {mix.shape}")
+
+    tracks_mono = 0.5 * (tracks[:, :, 0, :] + tracks[:, :, 1, :])      # (B, N, T)
+    stem_energy = (tracks_mono ** 2).sum(dim=-1)                       # (B, N)
+
+    # Numerators of the per-channel LSQ fit.
+    dot_L = (mix[:, 0:1, :] * tracks_mono).sum(dim=-1)                 # (B, N)
+    dot_R = (mix[:, 1:2, :] * tracks_mono).sum(dim=-1)
+
+    # Pan: gain-invariant ratio (no need to divide each dot by ‖stem‖²).
+    pan = (dot_R - dot_L) / (dot_R + dot_L + eps)
+    pan = pan.clamp(-1.0, 1.0)
+
+    # Gain: combined-channel magnitude in dB. Per-channel gain g_c =
+    # dot_c / stem_energy; combined linear gain = sqrt(g_L² + g_R²).
+    g_L = dot_L / (stem_energy + eps)
+    g_R = dot_R / (stem_energy + eps)
+    gain_lin = torch.sqrt(g_L.pow(2) + g_R.pow(2)).clamp(min=1e-9)
+    gain_db = 20.0 * torch.log10(gain_lin)
+    gain_db = gain_db.clamp(min=gain_floor_db)
+
+    # Silent / padded stems: pan → 0, gain → floor. Two safeguards:
+    # (1) self-energy below floor (catches numerically silent real stems);
+    # (2) explicit track_mask if provided (catches zero-padded slots).
+    silent = stem_energy <= 1e-9
+    pan = torch.where(silent, torch.zeros_like(pan), pan)
+    gain_db = torch.where(
+        silent, torch.full_like(gain_db, gain_floor_db), gain_db
+    )
+    if track_mask is not None:
+        mask_f = track_mask.to(pan.dtype)
+        pan = pan * mask_f
+        gain_db = torch.where(
+            track_mask, gain_db, torch.full_like(gain_db, gain_floor_db)
+        )
+    return {"pan": pan, "gain_db": gain_db}
+
+
+def compute_pan_target(
+    tracks: torch.Tensor,
+    mix: torch.Tensor,
+    track_mask: Optional[torch.Tensor] = None,
+    eps: float = 1e-9,
+) -> torch.Tensor:
+    """Back-compat shim: returns only the pan target from the LSQ fit.
+
+    Prefer `compute_lsq_track_targets` which returns pan + gain from the
+    same fit (no extra cost).
+    """
+    return compute_lsq_track_targets(tracks, mix, track_mask, eps=eps)["pan"]
+
+
+def compute_lsq_eq_target(
+    tracks: torch.Tensor,
+    mix: torch.Tensor,
+    track_mask: Optional[torch.Tensor] = None,
+    *,
+    sample_rate: int = 48_000,
+    n_fft: int = 2048,
+    hop_length: int = 512,
+    band_edges_hz: Optional[torch.Tensor] = None,
+    band_energy_floor_db: float = -60.0,
+    eps: float = 1e-9,
+) -> dict[str, torch.Tensor]:
+    """Per-track band-magnitude EQ-shape target via spectral LSQ cancellation.
+
+    The spectral analogue of `compute_lsq_track_targets`: for each track *i*
+    and frequency bin *f*, find the complex scalar `h_c(f)` that best
+    cancels the stem from channel *c* of the reference mix —
+
+        h_c(f) = ⟨STFT(ref_c)(f, ·), STFT(stem_i)(f, ·)*⟩_t
+                 / ‖STFT(stem_i)(f, ·)‖²_t
+
+    The combined-channel magnitude `√(|h_L|² + |h_R|²)` is the effective
+    "stem → mix" transfer function (engineer's EQ × pre-compressor magnitude
+    effect × averaged comp dynamics × absolute gain). Aggregate STFT bins
+    into K log-spaced bands (power-weighted by stem energy for coherence),
+    take log10, and **mean-center across bands** to extract just the EQ
+    shape — the absolute scale is already supervised by the gain target.
+
+    Returns dict with:
+        "eq_log10_centered": (B, N, K) — mean-centered log10-magnitude of
+                             the LSQ transfer per band. The supervision target.
+        "band_centers_hz":   (K,) — geometric-mean band centers, for
+                             evaluating the encoder's predicted EQ cascade.
+        "band_energy":       (B, N, K) — per-band stem energy. Use as a
+                             coherence weight in the loss (bands where the
+                             stem has no content are noisy; mask them out).
+
+    Memory: builds (B*N, F, frames) STFT of the stems ~ 4 × 42 × 1025 × ~750
+    × 8 bytes = ~1 GB on a typical batch (B=4, N_max=42, T=384k). Runs on
+    GPU; not in the worker process.
+
+    Args:
+        tracks:          (B, N_max, 2, T) — padded raw stems.
+        mix:             (B, 2, T) — reference mix.
+        track_mask:      (B, N_max) bool — masked slots get zeros.
+        sample_rate:     audio rate.
+        n_fft:           STFT size. 2048 ≈ 23 ms at 48 kHz — enough
+                         resolution for the lowest band edge (50 Hz ⇒
+                         ~2 bins wide).
+        hop_length:      STFT hop.
+        band_edges_hz:   (K+1,) band edges. Default 17 log-spaced edges
+                         from 50 Hz to 16 kHz ⇒ 16 bands.
+        band_energy_floor_db:  bands whose log10 stem energy is below this
+                         (relative to a per-stem max) are flagged in the
+                         `band_energy` output but still returned with a
+                         centered value (downstream loss should weight by
+                         `band_energy` for coherence).
+        eps:             div-by-zero guard.
+    """
+    if tracks.dim() != 4 or tracks.shape[2] != 2:
+        raise ValueError(f"expected (B, N, 2, T) tracks; got {tracks.shape}")
+    if mix.dim() != 3 or mix.shape[1] != 2:
+        raise ValueError(f"expected (B, 2, T) mix; got {mix.shape}")
+
+    if band_edges_hz is None:
+        band_edges_hz = torch.logspace(
+            float(np.log10(50.0)), float(np.log10(16_000.0)), 17,
+            dtype=torch.float32,
+        )
+    band_edges_hz = band_edges_hz.to(tracks.device).float()
+    K = band_edges_hz.shape[0] - 1
+    band_centers_hz = (band_edges_hz[:-1] * band_edges_hz[1:]).sqrt()  # geom mean
+
+    B, N, _, T = tracks.shape
+    stem_mono = 0.5 * (tracks[:, :, 0, :] + tracks[:, :, 1, :])  # (B, N, T)
+
+    win = torch.hann_window(n_fft, device=tracks.device, dtype=tracks.dtype)
+    flat_stem = stem_mono.reshape(B * N, T)
+    Stem = torch.stft(
+        flat_stem, n_fft=n_fft, hop_length=hop_length, win_length=n_fft,
+        window=win, return_complex=True, center=True,
+    )  # (B*N, F, frames)
+    F = Stem.shape[1]
+    Stem = Stem.reshape(B, N, F, -1)
+
+    Ref_L = torch.stft(
+        mix[:, 0], n_fft=n_fft, hop_length=hop_length, win_length=n_fft,
+        window=win, return_complex=True, center=True,
+    )  # (B, F, frames)
+    Ref_R = torch.stft(
+        mix[:, 1], n_fft=n_fft, hop_length=hop_length, win_length=n_fft,
+        window=win, return_complex=True, center=True,
+    )
+
+    # Per-bin LSQ. stem_pow ∈ ℝ⁺; numerators ∈ ℂ.
+    stem_pow = (Stem.abs() ** 2).sum(dim=-1)                                  # (B, N, F)
+    num_L = (Ref_L.unsqueeze(1) * Stem.conj()).sum(dim=-1)                    # (B, N, F)
+    num_R = (Ref_R.unsqueeze(1) * Stem.conj()).sum(dim=-1)
+    # |h_c|² = |num_c|² / stem_pow²  (since h_c = num_c / stem_pow, real denom)
+    inv_pow_sq = 1.0 / (stem_pow ** 2 + eps)
+    h_combined_mag_sq = (num_L.abs() ** 2 + num_R.abs() ** 2) * inv_pow_sq    # (B, N, F)
+
+    # Aggregate STFT bins into K log-spaced bands, power-weighted by stem
+    # energy. Bands with zero stem energy get a zero value (downstream loss
+    # uses `band_energy` to mask them).
+    freqs_hz = torch.fft.rfftfreq(n_fft, 1.0 / sample_rate).to(tracks.device)  # (F,)
+    band_log10 = torch.zeros(B, N, K, device=tracks.device, dtype=stem_pow.dtype)
+    band_energy = torch.zeros(B, N, K, device=tracks.device, dtype=stem_pow.dtype)
+    for k in range(K):
+        lo, hi = band_edges_hz[k], band_edges_hz[k + 1]
+        bin_mask = (freqs_hz >= lo) & (freqs_hz < hi)
+        if not bin_mask.any():
+            continue
+        w = stem_pow[..., bin_mask]                              # (B, N, n_bins_k)
+        h_sq = h_combined_mag_sq[..., bin_mask]                  # (B, N, n_bins_k)
+        wsum = w.sum(dim=-1) + eps
+        band_h_sq = (h_sq * w).sum(dim=-1) / wsum                # power-weighted
+        band_log10[:, :, k] = 0.5 * torch.log10(band_h_sq.clamp(min=1e-12))
+        band_energy[:, :, k] = wsum
+
+    # Mean-center the log-magnitude across bands per (B, N) — removes the
+    # absolute gain offset (which the gain target supervises separately).
+    band_log10_centered = band_log10 - band_log10.mean(dim=-1, keepdim=True)
+
+    if track_mask is not None:
+        m = track_mask.to(band_log10_centered.dtype).unsqueeze(-1)
+        band_log10_centered = band_log10_centered * m
+        band_energy = band_energy * m
+
+    return {
+        "eq_log10_centered": band_log10_centered,
+        "band_centers_hz": band_centers_hz,
+        "band_energy": band_energy,
+    }
 
 
 __all__ = [
@@ -366,4 +576,5 @@ __all__ = [
     "EQ_PARAM_KEYS",
     "STRIP_PARAM_KEYS", "BUS_PARAM_KEYS",
     "MertCacheLookup", "make_stage3_dataset", "collate_stage3",
+    "compute_lsq_track_targets", "compute_pan_target", "compute_lsq_eq_target",
 ]
