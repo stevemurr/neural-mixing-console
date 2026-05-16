@@ -27,6 +27,7 @@ from typing import Optional
 
 import numpy as np
 
+from .ring_buffer import RingBuffer
 from .session import Session
 
 # sounddevice is imported lazily inside start() — it loads the PortAudio
@@ -43,6 +44,7 @@ class AudioEngine:
         master_gain_db: float = -6.0,
         output_device: Optional[int | str] = None,
         loop: bool = True,
+        ring_buffers: Optional[list[RingBuffer]] = None,
     ) -> None:
         self.session = session
         self.block_size = block_size
@@ -50,6 +52,16 @@ class AudioEngine:
         self.output_device = output_device
         self.loop = loop
         self.sample_rate = session.sample_rate
+
+        # V1: per-track ring buffers receive every audio-callback slice. The
+        # inference thread snapshots them on its own cadence. None = V0 mode
+        # (no model in the loop).
+        if ring_buffers is not None and len(ring_buffers) != session.n_tracks:
+            raise ValueError(
+                f"ring_buffers has {len(ring_buffers)} entries but "
+                f"session has {session.n_tracks} tracks"
+            )
+        self.ring_buffers = ring_buffers
 
         self._playhead = 0  # in samples
         self._stream = None  # sd.OutputStream once started
@@ -97,6 +109,12 @@ class AudioEngine:
                 block = np.zeros((stems.shape[0], 2, frames), dtype=np.float32)
                 block[:, :, :head_len] = stems[:, :, pos:T]
                 self._playhead = T  # done
+
+        # V1: push each per-track slice into its ring buffer before summing.
+        # `block[i]` is a view (no alloc); `RingBuffer.write` is alloc-free.
+        if self.ring_buffers is not None:
+            for i, rb in enumerate(self.ring_buffers):
+                rb.write(block[i])
 
         # Sum stems → (2, frames), scale, write out. `outdata` is (frames, 2).
         # Use the preallocated scratch buffer when the block size matches

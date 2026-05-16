@@ -338,10 +338,19 @@ Ranked by leverage:
 ## Status
 
 - V0: shipped (`7f4d688`).
-- V1–V4: not started. Plan above is the blueprint.
+- V1: shipped — `ring_buffer.py`, `inference.py`, `scheduler.py`, with
+  `engine.py` writing each callback slice to per-track ring buffers and
+  the CLI starting a scheduler thread that prints a one-line param
+  summary each tick. No DSP is applied yet (V2's job). MERT is loaded
+  from the precomputed cache (auto-detected by session folder name; or
+  `--mert-cache-npz` for an explicit pointer). Tested with checkpoint
+  `dmc-data/checkpoints/v6.2-round11_2/mix_encoder_best.pt`.
+- V2–V4: not started.
 
-When resuming, the next concrete step is V1 — `ring_buffer.py`,
-`inference.py`, `scheduler.py`, and wiring them into `engine.py`'s
-audio callback (write side) + the CLI (start the scheduler thread,
-print predictions). Estimate: ~2 hours of focused work + smoke
-testing.
+The next concrete step is V2 — port `reference/`'s sample-by-sample
+strip + master bus DSP to a realtime-safe shape (carry state across
+blocks, numba on the compressor envelope follower), and apply the
+latest predicted params to the per-track slices before summing. The
+scheduler API is already shaped to feed the smoother in V3, so V2 can
+just hook `on_new_params` into a "current params" snapshot the audio
+callback reads.
