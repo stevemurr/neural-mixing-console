@@ -215,7 +215,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--song", required=True,
                     help="Session name as it appears under --staging-dir")
-    ap.add_argument("--staging-dir", default="/tmp/grafx-prune-data",
+    ap.add_argument("--staging-dir", default="dmc-data/grafx-prune-data",
                     help="Directory containing <song>/{stems/, mix.wav, "
                          "correspondence.yaml, alignment.pickle}, all 30 kHz")
     ap.add_argument("--config", default="mixing_console_full",

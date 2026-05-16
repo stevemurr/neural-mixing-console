@@ -134,8 +134,10 @@ def stage_session(session: str, staging_dir: Path, refwav_map: dict[str, Path]) 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--staging-dir", default="/tmp/grafx-prune-data",
-                    help="Where to stage the prepared session dirs.")
+    ap.add_argument("--staging-dir", default="dmc-data/grafx-prune-data",
+                    help="Where to stage the prepared session dirs. Default "
+                         "is under dmc-data/ (persistent, gitignored). Avoid "
+                         "/tmp — systemd-tmpfiles will eventually delete it.")
     ap.add_argument("--sessions", nargs="*", default=None,
                     help="Session names to stage. Use --all to stage every "
                          "ready session, --list-ready to just dump names.")
