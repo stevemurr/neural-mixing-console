@@ -369,7 +369,11 @@ def _format_preview_params_md(
         rel   = p[k("release_ms")].item()
         drv   = p[k("clip_drive_db")].item()
         cmix  = p[k("clip_mix")].item()
-        pan_phys = 2.0 * p[k("pan")].item() - 1.0   # [0,1] → [-1, +1]
+        # PARAM_RANGES["pan"] = (-1, 1), so `strip_phys[pan_idx]` is already
+        # in [-1, +1] — no remapping needed. (Earlier formatter buggily
+        # applied `2x − 1` here, which gave displayed values of −3 when the
+        # model collapsed to pan = −1.0.)
+        pan_phys = p[k("pan")].item()
 
         lines.append(
             f"| {i} | {gain:+5.1f} dB | {hpf:.0f} Hz | "
