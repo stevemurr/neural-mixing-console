@@ -1,0 +1,185 @@
+{
+  "classes": [
+    "BackingVox",
+    "Bass",
+    "Brass",
+    "Drums",
+    "Guitar",
+    "Keys",
+    "LeadVox",
+    "Other",
+    "Strings",
+    "Synth"
+  ],
+  "n_train": 6166,
+  "n_test": 1537,
+  "logreg": {
+    "accuracy": 0.5406636304489265,
+    "report": {
+      "BackingVox": {
+        "precision": 0.2727272727272727,
+        "recall": 0.4,
+        "f1-score": 0.32432432432432434,
+        "support": 60.0
+      },
+      "Bass": {
+        "precision": 0.4,
+        "recall": 0.28717948717948716,
+        "f1-score": 0.33432835820895523,
+        "support": 195.0
+      },
+      "Brass": {
+        "precision": 0.10606060606060606,
+        "recall": 0.3684210526315789,
+        "f1-score": 0.16470588235294117,
+        "support": 19.0
+      },
+      "Drums": {
+        "precision": 0.8387799564270153,
+        "recall": 0.7793522267206477,
+        "f1-score": 0.8079748163693599,
+        "support": 494.0
+      },
+      "Guitar": {
+        "precision": 0.8398268398268398,
+        "recall": 0.5878787878787879,
+        "f1-score": 0.6916221033868093,
+        "support": 330.0
+      },
+      "Keys": {
+        "precision": 0.15894039735099338,
+        "recall": 0.631578947368421,
+        "f1-score": 0.25396825396825395,
+        "support": 38.0
+      },
+      "LeadVox": {
+        "precision": 0.4233576642335766,
+        "recall": 0.5471698113207547,
+        "f1-score": 0.4773662551440329,
+        "support": 106.0
+      },
+      "Other": {
+        "precision": 0.32954545454545453,
+        "recall": 0.19333333333333333,
+        "f1-score": 0.24369747899159663,
+        "support": 150.0
+      },
+      "Strings": {
+        "precision": 0.2604166666666667,
+        "recall": 0.7142857142857143,
+        "f1-score": 0.3816793893129771,
+        "support": 35.0
+      },
+      "Synth": {
+        "precision": 0.35802469135802467,
+        "recall": 0.2636363636363636,
+        "f1-score": 0.3036649214659686,
+        "support": 110.0
+      },
+      "accuracy": 0.5406636304489265,
+      "macro avg": {
+        "precision": 0.39876795491964495,
+        "recall": 0.47728357243550884,
+        "f1-score": 0.39833317835252186,
+        "support": 1537.0
+      },
+      "weighted avg": {
+        "precision": 0.6094493874881078,
+        "recall": 0.5406636304489265,
+        "f1-score": 0.5587026109375627,
+        "support": 1537.0
+      }
+    }
+  },
+  "mlp": {
+    "accuracy": 0.656473649967469,
+    "report": {
+      "BackingVox": {
+        "precision": 0.3728813559322034,
+        "recall": 0.36666666666666664,
+        "f1-score": 0.3697478991596639,
+        "support": 60.0
+      },
+      "Bass": {
+        "precision": 0.5823529411764706,
+        "recall": 0.5076923076923077,
+        "f1-score": 0.5424657534246575,
+        "support": 195.0
+      },
+      "Brass": {
+        "precision": 0.5,
+        "recall": 0.05263157894736842,
+        "f1-score": 0.09523809523809523,
+        "support": 19.0
+      },
+      "Drums": {
+        "precision": 0.7950530035335689,
+        "recall": 0.9109311740890689,
+        "f1-score": 0.8490566037735849,
+        "support": 494.0
+      },
+      "Guitar": {
+        "precision": 0.7481108312342569,
+        "recall": 0.9,
+        "f1-score": 0.8170563961485557,
+        "support": 330.0
+      },
+      "Keys": {
+        "precision": 0.25,
+        "recall": 0.15789473684210525,
+        "f1-score": 0.1935483870967742,
+        "support": 38.0
+      },
+      "LeadVox": {
+        "precision": 0.46258503401360546,
+        "recall": 0.6415094339622641,
+        "f1-score": 0.5375494071146245,
+        "support": 106.0
+      },
+      "Other": {
+        "precision": 0.45454545454545453,
+        "recall": 0.1,
+        "f1-score": 0.16393442622950818,
+        "support": 150.0
+      },
+      "Strings": {
+        "precision": 0.41935483870967744,
+        "recall": 0.37142857142857144,
+        "f1-score": 0.3939393939393939,
+        "support": 35.0
+      },
+      "Synth": {
+        "precision": 0.35185185185185186,
+        "recall": 0.34545454545454546,
+        "f1-score": 0.3486238532110092,
+        "support": 110.0
+      },
+      "accuracy": 0.656473649967469,
+      "macro avg": {
+        "precision": 0.4936735310997089,
+        "recall": 0.43542090150828977,
+        "f1-score": 0.43111602153358675,
+        "support": 1537.0
+      },
+      "weighted avg": {
+        "precision": 0.6279514754613107,
+        "recall": 0.656473649967469,
+        "f1-score": 0.6245279994205789,
+        "support": 1537.0
+      }
+    }
+  },
+  "class_counts": {
+    "Drums": 2540,
+    "Bass": 911,
+    "Synth": 602,
+    "LeadVox": 639,
+    "Other": 590,
+    "Keys": 236,
+    "Strings": 175,
+    "Guitar": 1469,
+    "Brass": 103,
+    "BackingVox": 438
+  },
+  "n_mels": 26
+}

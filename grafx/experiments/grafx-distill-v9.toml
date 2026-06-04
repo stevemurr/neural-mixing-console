@@ -1,0 +1,86 @@
+# grafx-distill v9 — v8 minus L_inter
+#
+# Single delta vs v8: `w_inter = 0`. Everything else identical (same data,
+# same architecture, same loss weights for w_distill/w_recon/w_cons, same
+# cosine ramp, same bf16, same batch). Clean A/B test of the FitNets-style
+# intermediate-feature loss.
+#
+# Motivation — see notes/distillation_research_2026-05.md "fixation"
+# discussion. v8's first two val passes:
+#
+#   step  500   L_p=605   L_c= 0.79   L_d=0.46   L_r=0.755   gap=1.05   ← new best
+#   step 1000   L_p=623   L_c=14.62   L_d=0.55   L_r=0.894   gap=1.22   ← regressed
+#
+# `L_r` worsened 18%, `gap` widened 16%, `L_c` exploded 18×. Training-side
+# L_d/L_r were tiny (0.1–0.2) while val was 4–5× higher — classic
+# generalization gap. Hypothesis: L_inter was forcing the encoder to fit
+# the teacher's gauge-degenerate per-stage audio at delay/reverb (smoke
+# test showed L_inter/{delay,reverb} 5–30× heavier than other stages —
+# the gauge-noisy stages). Encoder capacity getting eaten by overfitting
+# to teacher idiosyncrasies that don't generalize across songs.
+#
+# v9 drops L_inter entirely (mitigation option A, the cleanest). This
+# also recovers ~30% per-step speed by skipping forward_with_intermediates
+# and the 14 per-stage MSE evals — expected ~8–9 s/step → ~18 h wallclock
+# for 8000 steps.
+#
+# If v9 outperforms v8's step-500 best (val L_r < 0.755), the diagnosis
+# was right. If v9 also plateaus around 0.75–0.90, the issue was deeper
+# (e.g., the AF-loss design itself, or insufficient training signal
+# without the per-stage hints) and we go to v10 with a different lever.
+
+[run]
+name = "grafx-distill-v9"
+trainer = "grafx/training/train_grafx_distill.py"
+
+[hardware]
+ram_floor_gb = 6
+pytorch_cuda_alloc_conf = "expandable_segments:True"
+
+[train]
+# --- Data (unchanged from v8) ---
+staging_dir = "dmc-data/grafx-prune-data"
+sample_rate = 30000
+audio_len = 180000
+n_max = 24
+max_groups = 16
+val_frac = 0.1
+min_window_gap = 30000
+max_label_loss = 5.0
+cache_size = 4
+num_workers = 2
+pairs_per_session = 8
+
+# --- Model (unchanged) ---
+d_model = 384
+n_track_layers = 4
+
+# --- Optim (unchanged from v8) ---
+batch_size = 4
+grad_accum = 2
+max_steps = 8000
+lr = 1e-4
+lr_warmup_steps = 300
+lr_cosine_min = 1e-5
+weight_decay = 1e-4
+grad_clip = 20.0
+
+# --- Loss (CHANGE: w_inter = 0; everything else identical to v8) ---
+w_param = 0.0
+w_cons = 0.3
+w_distill = 1.0
+w_recon = 1.0
+w_inter = 0.0                # DROPPED — see header
+distill_warmup = 0
+use_af_loss = true
+w_cosine_ramp = 800
+
+# --- Logging / ckpt ---
+log_every = 50
+val_every = 500
+ckpt_every = 1000
+seed = 0
+
+# --- Memory safety ---
+cuda_memory_fraction = 0.65
+use_bf16 = true

@@ -1,0 +1,111 @@
+# grafx-distill v6 — baseline run on freshly-relabeled corpus
+#
+# First distillation run after the three load-bearing fixes shipped in
+# 2026-05 (see notes/RUNS.md when retro is written):
+#
+#   1. `DEFAULT_PROCESSOR_ORDER` in `models/grafx_console.py` swapped to
+#      match grafx-prune's base.yaml exactly (eq -> comp -> ng -> si -> gp
+#      -> delay -> reverb). v5 ran with the wrong order, so its
+#      L_distill_audio target was a degraded mix.
+#   2. `_DryWetLogitWrap` added to the console; per-processor `drywet_logit`
+#      now part of the schema. Old labels dropped the teacher's drywet
+#      state entirely; new labels capture it.
+#   3. Stem-mix alignment fix in `training/train_grafx_multi._load_session`
+#      (used by this trainer too). Old data path fed up to 5 s out-of-sync
+#      audio — affected L_recon in `train_grafx_multi` but, importantly,
+#      NOT this trainer (distillation never touches the engineer mix).
+#      The fix lands here only as harmless internal consistency.
+#
+# Loss strategy follows the within-class EQ variance finding: the teacher's
+# 1024-bin EQ has ~10x perceptual redundancy and Adam lands on a different
+# arbitrary point per song (within/across-class std ratio ~1.0 across every
+# instrument class). Direct L_param-MSE on EQ is gauge-degenerate. So
+# L_distill_audio carries the run (now a confirmed-faithful objective
+# since the console reproduces grafx-prune's render_grafx within ~10-40 %),
+# L_param stays as the warm-start signal at half its v5 weight, and
+# L_cons keeps window-to-window predictions stable for DAW deployment.
+#
+# Compared to v5 (last attempted distill run, on broken labels + wrong
+# console order):
+#   w_param      1.0  -> 0.5    (degenerate target -> less authority)
+#   w_distill    0.5  -> 1.0    (faithful objective -> primary)
+#   distill_warmup 5000 -> 3000 (sooner is better with the order fixed)
+#   max_label_loss none -> 5.0  (drop the 2 outlier songs at >18 / >34)
+#   n_max        20 -> 24       (capture median stem count, was truncating)
+#   grad_accum   1 -> 2         (effective B=8 forward exs, less variance)
+#
+# Cold start: no `init_from`. v5's best.pt is on the wrong schema (no
+# drywet head, wrong-order chain) and warm-starting from it could anchor
+# the encoder near bad params. Fresh init lets the head priors set
+# sensible defaults via the small-random Linear init in
+# `ProcessorParamHead`.
+
+[run]
+name = "grafx-distill-v6"
+trainer = "grafx/training/train_grafx_distill.py"
+
+[hardware]
+ram_floor_gb = 6              # The 5 s watchdog poll can't catch a sub-poll
+                              # allocation spike (we saw exactly that — the box
+                              # rebooted between step 0 and the next watchdog
+                              # tick on the 19:23 attempt). The cuda fraction
+                              # cap below is the primary defence; the watchdog
+                              # is a secondary net for slow growth.
+pytorch_cuda_alloc_conf = "expandable_segments:True"
+
+[train]
+# --- Data ---
+staging_dir = "dmc-data/grafx-prune-data"
+sample_rate = 30000
+audio_len = 180000           # 6 s @ 30 kHz, matches DAW deployment window
+n_max = 24                   # captures the corpus median (was 20, truncating)
+max_groups = 16
+val_frac = 0.1
+min_window_gap = 30000       # 1 s min between paired window starts
+max_label_loss = 5.0         # drops the 2 songs (CarolDant, new max-34) where
+                             # the teacher failed to converge even at 12x500
+cache_size = 4
+num_workers = 2               # workers prefetch in parallel with compute; each
+                              # worker owns its own LRU cache, so total in-RAM
+                              # sessions = num_workers * cache_size = 8
+pairs_per_session = 8         # amortize ~1.8 GB session-load over 8 yields;
+                              # without this, workers can't keep up with compute
+                              # (stepwise GPU-util pattern)
+
+# --- Model ---
+d_model = 384
+n_track_layers = 4
+# init_from: omitted (cold start) — see header
+
+# --- Optim ---
+batch_size = 2               # pair -> 4 forward exs per micro-step
+grad_accum = 2               # -> 8 forward exs per opt step
+max_steps = 15000
+lr = 1e-4
+lr_warmup_steps = 500
+lr_cosine_min = 1e-5
+weight_decay = 1e-4
+grad_clip = 20.0             # v5 chose 20; typical post-accum grad norm
+                             # in whitened-loss units sits around 200-300
+
+# --- Loss ---
+w_param = 0.5                # secondary (degenerate on high-dim params)
+w_cons = 0.3                 # window-consistency for DAW stability
+w_distill = 1.0              # primary objective, faithful console verified
+distill_warmup = 3000        # param+cons only for first 3 k steps
+whiten_labels = true
+
+# --- Logging / ckpt ---
+log_every = 50
+val_every = 1000
+ckpt_every = 2000
+seed = 0
+
+# --- Memory safety ---
+cuda_memory_fraction = 0.65   # ~78 GB cap on the GB10's 121 GB unified pool.
+                              # Hard cap from `torch.cuda.set_per_process_memory_fraction`:
+                              # any allocation past this raises CUDA OOM in Python
+                              # (catchable, recoverable) instead of escalating to
+                              # the NVRM driver (system reboot). Headroom: 43 GB
+                              # for OS + page cache + 2 dataloader worker
+                              # subprocesses (each holds a ~7 GB session cache).

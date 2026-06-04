@@ -1,0 +1,52 @@
+# v13 Stage 3 (v2) — SHORT smoke run to confirm the pan distribution spreads
+# (continuous tanh head + sign-aware balance / sign-blind width loss). Same
+# config as v13-pan-recon.toml but 400 steps with val every 100 so the pan
+# histograms come in fast. Throwaway out-dir.
+
+[run]
+name = "v13-pan-recon-smoke"
+trainer = "v13/training/train_pan_recon.py"
+
+[hardware]
+ram_floor_gb = 6
+pytorch_cuda_alloc_conf = "expandable_segments:True"
+
+[train]
+staging_dir = "dmc-data/grafx-prune-data-48k"
+sample_rate = 48000
+audio_len = 144000     # 3 s @ 48 kHz — enough for stable ILD estimates
+n_max = 64
+n_bins = 26
+examples_per_session = 20
+val_frac = 0.1
+seed = 0
+
+batch_size = 16
+num_workers = 2         # smoke: keep host-RAM cache small on the GB10 box
+cache_size = 2          # 2 workers × 2 sessions resident — well under the 6 GiB floor
+
+# --- Model ---
+d_model = 192
+n_layers = 4
+n_heads = 4
+ffn_mult = 4
+dropout = 0.1
+continuous = true
+
+# --- Optim ---
+max_steps = 400
+lr = 1e-4
+lr_warmup_steps = 200
+lr_cosine_min_ratio = 0.05
+weight_decay = 1e-4
+grad_clip = 1.0
+
+# --- Loss ---
+ild_eps = 1e-4
+w_balance = 1.0
+w_width = 1.0
+
+# --- Logging / ckpt ---
+log_every = 25
+val_every = 100
+ckpt_every = 1000

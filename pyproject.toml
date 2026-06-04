@@ -34,6 +34,7 @@ dependencies = [
     # Training UX.
     "tqdm>=4.66",
     "tensorboard>=2.15",
+    "umap-learn>=0.5.12",
 ]
 
 [project.optional-dependencies]

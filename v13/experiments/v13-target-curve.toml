@@ -1,0 +1,52 @@
+# v13 Stage 2 — target-curve transformer
+#
+# Trains the small transformer (1.8 M params) that maps per-track
+# contribution vectors C → mix-bus dB delta. Pure supervised regression
+# against the precomputed (C, target_delta_db) pairs.
+#
+# Architecture: 4-layer transformer over track tokens with a learned
+# [MIX] token, no positional embedding (permutation invariant).
+#
+# Data: 5800+ examples (~20 windows × 289 sessions), ~14 MB in memory.
+# Training is GPU-cheap because the dataset is tiny — minutes total.
+#
+# Prereq: run v13/scripts/precompute_v13_dataset.py first.
+
+[run]
+name = "v13-target-curve"
+trainer = "v13/training/train_target_curve.py"
+
+[hardware]
+ram_floor_gb = 4
+pytorch_cuda_alloc_conf = "expandable_segments:True"
+
+[train]
+precomputed = "dmc-data/v13_precomputed.pt"
+val_frac = 0.1
+seed = 0
+batch_size = 64
+num_workers = 0
+
+# --- Model ---
+n_bins = 26
+d_model = 192
+n_layers = 4
+n_heads = 4
+ffn_mult = 4
+dropout = 0.1
+max_delta_db = 24.0       # widened from 12 — target 95th pct |delta| = 18 dB
+                          # (engineer/dry level offset + comp + reverb in v1 target)
+huber_beta = 2.0
+
+# --- Optim ---
+max_steps = 5000
+lr = 1e-3
+lr_warmup_steps = 200
+lr_cosine_min_ratio = 0.05
+weight_decay = 1e-4
+grad_clip = 1.0
+
+# --- Logging / ckpt ---
+log_every = 50
+val_every = 200
+ckpt_every = 1000

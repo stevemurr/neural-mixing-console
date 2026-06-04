@@ -1,0 +1,82 @@
+# grafx-distill v7 — bf16 encoder + bigger effective batch
+#
+# Single experimental delta vs v6:
+#   - encoder runs under autocast(bf16); outputs cast back to fp32 before
+#     the DSP console (smoke-tested 2026-05-25: identical losses within
+#     0.6%, no NaN/Inf — see notes/experiments.md "Mixed precision")
+#   - batch_size 2 -> 4, grad_accum 2 (unchanged)
+#     => effective batch B_eff = 16 forward exs / opt step (2x v6's 8)
+#   - max_steps 15000 -> 8000
+#     (square-root rule: 2x batch ≈ halve steps for similar quality;
+#      bumped slightly above 7500 to leave room for val to settle)
+#
+# Everything else identical to v6 — clean A/B for the bf16+batch change.
+# Per-(proc, param) L_param weighting, EMA, side-time L1, best-ckpt fix
+# all queued for v8+ (see notes/experiments.md).
+#
+# Memory budget — measured in the b_pair sweep 2026-05-25:
+#   b_pair=4 bf16:    50.2 GB peak  (vs 36 GB for v6 fp32 b_pair=2)
+#   under the 65 % cap (78 GB): 28 GB headroom — comfortable.
+#
+# Wallclock projection (smoke-test step time scaled for actual training
+# load; smoke times are inflated ~2x by empty_cache+sync calls):
+#   b_pair=4 grad_accum=2: ~12-15 s / opt step
+#   8000 steps × 14 s = ~31 hours
+#   vs v6's ~14 h projected for 15000 steps fp32 — slower wallclock per
+#   total opt step but each step processes 2x as much data, so per-data
+#   throughput is comparable. The gain over v6 comes from being able to
+#   reach a similar training endpoint with fewer noisier opt steps.
+
+[run]
+name = "grafx-distill-v7"
+trainer = "grafx/training/train_grafx_distill.py"
+
+[hardware]
+ram_floor_gb = 6
+pytorch_cuda_alloc_conf = "expandable_segments:True"
+
+[train]
+# --- Data (unchanged from v6) ---
+staging_dir = "dmc-data/grafx-prune-data"
+sample_rate = 30000
+audio_len = 180000
+n_max = 24
+max_groups = 16
+val_frac = 0.1
+min_window_gap = 30000
+max_label_loss = 5.0
+cache_size = 4
+num_workers = 2
+pairs_per_session = 8
+
+# --- Model (unchanged) ---
+d_model = 384
+n_track_layers = 4
+
+# --- Optim — bigger batch, fewer steps ---
+batch_size = 4               # was 2 — paired -> 8 forward exs / micro-step
+grad_accum = 2               # unchanged -> 16 forward exs / opt step (2x v6)
+max_steps = 8000             # was 15000 — sqrt rule for 2x batch
+lr = 1e-4                    # unchanged; bigger batch + same lr is
+                             # conservative (could try 1.4e-4 later if needed)
+lr_warmup_steps = 300        # was 500 — kept at ~4% of total steps
+lr_cosine_min = 1e-5
+weight_decay = 1e-4
+grad_clip = 20.0
+
+# --- Loss (unchanged from v6) ---
+w_param = 0.5
+w_cons = 0.3
+w_distill = 1.0
+distill_warmup = 1600        # was 3000 — kept at ~20% of total steps
+whiten_labels = true
+
+# --- Logging / ckpt ---
+log_every = 50
+val_every = 500              # was 1000 — denser feedback with fewer steps
+ckpt_every = 1000            # was 2000 — same ratio
+seed = 0
+
+# --- Memory safety ---
+cuda_memory_fraction = 0.65
+use_bf16 = true              # encoder-only autocast(bf16); see header

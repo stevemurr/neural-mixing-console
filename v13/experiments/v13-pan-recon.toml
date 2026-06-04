@@ -1,0 +1,69 @@
+# v13 Stage 3 (v2) — reconstruction-based pan training
+#
+# Predicts per-track pan from C + is_stereo. No group conditioning, no LS
+# targets, no engineering-convention overrides. Supervision is the engineer
+# mix audio via per-band ILD loss. Continuous tanh head emits pan_dir ∈
+# (-1, +1) directly — the recon loss is differentiable in pan_dir, so the
+# gradient is exact end-to-end (no straight-through estimator, no softmax
+# saturation lock-in).
+#
+# Fully audio-driven, deployment-ready architecture (no correspondence.yaml
+# dependency at inference).
+
+[run]
+name = "v13-pan-recon"
+trainer = "v13/training/train_pan_recon.py"
+
+[hardware]
+ram_floor_gb = 6
+pytorch_cuda_alloc_conf = "expandable_segments:True"
+
+[train]
+staging_dir = "dmc-data/grafx-prune-data-48k"
+sample_rate = 48000
+audio_len = 144000     # 3 s @ 48 kHz — enough for stable ILD estimates
+n_max = 64
+n_bins = 26
+examples_per_session = 20
+# Host-RAM cache budget on the GB10 unified-memory box (measured ~2.5 GiB per
+# decoded session). Both train and (persistent) val workers are resident at once,
+# so resident sessions ≈ (2·num_workers)·cache_size. The original 4×8 held ~64
+# sessions ≈ 160 GB and tripped the 6 GiB watchdog. 4×4 → ~32 sessions ≈ 80 GB,
+# leaving 20–40 GB free — uses the headroom and keeps the LRU warm (less decode
+# thrashing) while staying clear of the floor. GPU side is only ~15 GB, not the
+# constraint here.
+cache_size = 4
+val_frac = 0.1
+seed = 0
+
+batch_size = 16
+num_workers = 4
+
+# --- Model ---
+d_model = 192
+n_layers = 4
+n_heads = 4
+ffn_mult = 4
+dropout = 0.1
+continuous = true      # tanh pan_dir head (default); see header
+
+# --- Optim ---
+max_steps = 1500
+lr = 1e-4
+lr_warmup_steps = 200
+lr_cosine_min_ratio = 0.05
+weight_decay = 1e-4
+grad_clip = 1.0
+
+# --- Loss ---
+# Two co-equal per-band terms, both O(1) so the weights are comparable:
+#   w_balance — sign-aware DIRECTION (which side); prevents one-side collapse.
+#   w_width   — sign-blind COMMITMENT (how wide); prevents all-center collapse.
+ild_eps = 1e-4
+w_balance = 1.0
+w_width = 1.0
+
+# --- Logging / ckpt ---
+log_every = 25
+val_every = 200
+ckpt_every = 1000

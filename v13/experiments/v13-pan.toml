@@ -1,0 +1,51 @@
+# v13 Stage 3 — pan-direction transformer
+#
+# Trains the small transformer that maps per-track contribution vectors C
+# + is_stereo flag → per-track pan_dir in [-1, +1]. Same body as Stage 2
+# (TargetCurveNet), but reads off per-track outputs instead of pooling.
+#
+# Loss is MSE on LS-recovered pan targets, masked to real mono tracks
+# (stereo tracks bypass pan and don't participate in the loss).
+#
+# Prereq: run v13/scripts/precompute_v13_dataset.py to populate pan_target
+# and is_stereo fields in the dataset.
+
+[run]
+name = "v13-pan"
+trainer = "v13/training/train_pan.py"
+
+[hardware]
+ram_floor_gb = 4
+pytorch_cuda_alloc_conf = "expandable_segments:True"
+
+[train]
+precomputed = "dmc-data/v13_precomputed.pt"
+val_frac = 0.1
+seed = 0
+batch_size = 64
+num_workers = 0
+
+# --- Model ---
+n_bins = 26
+d_model = 192
+n_layers = 4
+n_heads = 4
+ffn_mult = 4
+dropout = 0.1
+
+# --- Optim ---
+max_steps = 5000
+lr = 1e-3
+lr_warmup_steps = 200
+lr_cosine_min_ratio = 0.05
+weight_decay = 1e-4
+grad_clip = 1.0
+
+# --- Class-balanced CE weights (L/R upweighted vs Center) ---
+weight_LR = 2.0
+weight_C  = 1.0
+
+# --- Logging / ckpt ---
+log_every = 50
+val_every = 200
+ckpt_every = 1000

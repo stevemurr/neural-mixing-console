@@ -1,0 +1,89 @@
+# minimal-v12 Phase 2 — synthetic-supervision pretraining (48 kHz)
+#
+# See notes/minimal_console_design_2026-05.md for full design.
+#
+# What this trains:
+#   - Encoder + MinimalConsole (RBJ EQ + Compressor + StereoImager + Gain/Pan)
+#   - Synthetic supervision: sample random params per batch, render
+#     synth_mix on-the-fly, train against (L_param + L_recon vs synth_mix)
+#   - No teacher labels, no engineer-mix supervision in this phase
+#   - L_param is now MEANINGFUL (params 1-to-1 with perceptual DoF;
+#     params caused the mix → no gauge degeneracy)
+#
+# v12.1: bumped from 30 kHz to 48 kHz to preserve the air band (12–20 kHz)
+# that engineers actively mix in, and to remove the resample-in / resample-out
+# overhead during DAW deployment.
+#
+# Output: encoder that knows how to invert the MinimalConsole DSP graph
+# from stems. Phase 3 then fine-tunes against real engineer mixes.
+
+[run]
+name = "minimal-v12-synth"
+trainer = "grafx/training/train_minimal.py"
+
+[hardware]
+ram_floor_gb = 6
+pytorch_cuda_alloc_conf = "expandable_segments:True"
+
+[train]
+mode = "synth"
+
+# --- Data ---
+staging_dir = "dmc-data/grafx-prune-data-48k"
+sample_rate = 48000
+audio_len = 288000           # 6 s @ 48 kHz, matches DAW deployment window
+n_max = 24
+max_groups = 16
+val_frac = 0.1
+cache_size = 4
+num_workers = 2
+
+# --- Model (same encoder as v11b — schema auto-adapts to MinimalConsole) ---
+d_model = 384
+n_track_layers = 4
+
+# --- Optim ---
+# v12 at 30 kHz measured 42 GB peak at b=8. At 48 kHz with audio_len=288k
+# and the bumped STFT chain (1024/2048/8192), b=8 triggered the 6 GB
+# system-RAM watchdog floor during smoke. Dropped to b=6 — confirmed stable.
+# Step time ~19-22 s/step at 48 k vs 12.9 s/step at 30 k → budget ~44 h for
+# 8000 steps.
+batch_size = 6
+grad_accum = 1
+max_steps = 8000
+lr = 1e-4
+lr_warmup_steps = 300
+lr_cosine_min = 1e-5
+weight_decay = 1e-4
+grad_clip = 20.0
+
+# --- Loss ---
+# v12.1 Path B: structural gauge fixes (group gain dropped, drywet
+# removed from eq/imager/gain) make L_param meaningful for everything
+# except the EQ cascade. We keep L_param at full weight but expect it
+# to plateau at the residual EQ-cascade orbit variance, while the gain,
+# compressor, and stereo params should converge cleanly.
+#
+# AF features: full Diff-MST set with exact paper weights
+# (rms=0.1, crest=0.001, spec=0.1, width=1.0, imbalance=1.0). Each
+# feature correlates closely with a specific console DoF; the per-DoF
+# gradient signal is what pure MR-STFT lacks.
+w_param = 1.0
+w_recon = 1.0
+w_rms = 0.1                  # Diff-MST paper
+w_crest = 0.001              # Diff-MST paper
+w_spec = 0.1                 # Diff-MST paper (bark→log-mel)
+w_stereo_width = 1.0         # Diff-MST paper
+w_stereo_imbalance = 1.0     # Diff-MST paper
+w_af = 1.0                   # multiplier on the whole AF sum
+w_cosine_ramp = 400          # ramp w_recon from 0 to 1 over 400 steps
+
+# --- Logging / ckpt ---
+log_every = 50
+val_every = 500
+ckpt_every = 1000
+seed = 0
+
+# --- Memory safety ---
+cuda_memory_fraction = 0.75   # bumped from 0.65 to give 48k buffers headroom
+use_bf16 = true
