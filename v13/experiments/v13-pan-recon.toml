@@ -11,7 +11,7 @@
 # dependency at inference).
 
 [run]
-name = "v13-pan-recon"
+name = "v13-pan-recon-w1.0"
 trainer = "v13/training/train_pan_recon.py"
 
 [hardware]
