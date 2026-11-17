@@ -22,6 +22,16 @@ Point the command at aligned, individual tracks starting at time zero. It includ
 
 The model currently predicts EQ. Pan and fader values are editable starting settings. Use a fresh output path for each mix or replay.
 
+## Audition runs in the browser
+
+    uv run nmc audition
+
+Open **http://127.0.0.1:8766** on the machine running the checkout. Select a run, song and listening point. The scored excerpts offer **Prediction**, **Dry sum**, and **Engineer mix** at matched RMS and common peak headroom. Switching source keeps playback at the same position in the excerpt. Click the waveform to seek, or enable Loop to repeat it. **Full preview** plays the complete model output with its original master gain.
+
+The library reads local run records and WAVs directly. Refresh the run library after a new run finishes. Inspection runs expose their saved dry/reference pairs; feature-cache replays appear with a “No audio” status. Use `--runs-dir PATH` for another run collection or `--port PORT` to change the listening port. For a remote checkout, start the tool on the project machine and forward its loopback port with `ssh -L 8766:127.0.0.1:8766 user@project-machine`.
+
+Current attempts live under `runs/<recipe>/<run-id>/`. The legacy logs, PID files and TensorBoard event directories from this checkout were moved together into `dmc-data/archive/runs-pre-manifests/` with their original names.
+
 ## Reproduce and track an experiment
 
 From the repository root, install the project with `uv sync --locked`. For an existing research environment with locally installed audio tools, `uv pip install --no-deps --no-build-isolation -e .` installs the command using the environment’s existing dependencies and setuptools.

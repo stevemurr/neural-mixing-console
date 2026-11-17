@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Audition · Neural Mixing Console</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script defer src="/player.js"></script>
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <span class="mark" aria-hidden="true"
+          ><i></i><i></i><i></i><i></i><i></i></span
+        >Neural Mixing Console
+      </div>
+      <div class="local"><i></i> Local session</div>
+    </header>
+    <div class="layout">
+      <aside>
+        <div class="section">
+          <h2>Run library</h2>
+          <button
+            id="refresh"
+            title="Refresh run library"
+            aria-label="Refresh run library"
+          >
+            ↻
+          </button>
+        </div>
+        <nav id="runs" aria-label="Experiment runs"></nav>
+      </aside>
+      <main>
+        <h1>Audition</h1>
+        <p id="notice" role="status">Loading runs…</p>
+        <div id="workspace" hidden>
+          <div class="runline">
+            <strong id="recipe"></strong><span id="stamp"></span>
+          </div>
+          <label class="field" for="song">Song</label
+          ><select id="song"></select>
+          <section class="deck">
+            <div class="deckhead">
+              <h2 id="passage">Playback</h2>
+              <label class="loop"
+                ><input id="loop" type="checkbox" /> Loop</label
+              >
+            </div>
+            <div class="wave">
+              <div id="bars" aria-hidden="true"></div>
+              <span id="cursor"></span
+              ><input
+                type="range"
+                min="0"
+                max="1000"
+                value="0"
+                id="seek"
+                aria-label="Playback position"
+              />
+            </div>
+            <div class="transport">
+              <button id="play">▶ Play</button>
+              <div id="time">0:00 / 0:00</div>
+              <a id="wav">Open WAV ↗</a>
+            </div>
+            <div
+              class="variants"
+              id="variants"
+              role="group"
+              aria-label="Listening source"
+            ></div>
+          </section>
+          <div class="section">
+            <h2>Listening points</h2>
+            <span id="count"></span>
+          </div>
+          <div id="clips"></div>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>

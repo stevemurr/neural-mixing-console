@@ -29,11 +29,18 @@ def main():
     launch.add_argument("recipe", type=Path)
     launch.add_argument("--check", action="store_true")
     launch.add_argument("--runs-dir", type=Path, default=Path("runs"))
+    listen = commands.add_parser("audition", help="listen to experiment runs in your browser")
+    listen.add_argument("--runs-dir", type=Path, default=Path("runs"))
+    listen.add_argument("--port", type=int, default=8766)
     listing = commands.add_parser("runs").add_subparsers(required=True).add_parser("list")
     listing.add_argument("--runs-dir", type=Path, default=Path("runs"))
     args = parser.parse_args()
     try:
-        if args.command == "mix":
+        if args.command == "audition":
+            from nmc.audition import serve
+
+            serve(args.runs_dir, args.port)
+        elif args.command == "mix":
             from nmc.mix import DEFAULT_CHECKPOINT, mix_folder
 
             root = args.tracks_dir.resolve()

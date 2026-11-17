@@ -54,6 +54,9 @@ nmc = "nmc.cli:main"
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.package-data]
+nmc = ["web/*.html", "web/*.css", "web/*.js"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

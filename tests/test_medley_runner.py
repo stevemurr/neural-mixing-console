@@ -143,6 +143,13 @@ class MedleyRunnerTests(unittest.TestCase):
             self.assertEqual(row["fold"], "validation")
             self.assertEqual(len(set(w["start_sample"] for w in row["windows"])), 3)
             bundle = directory / row["bundle"]
+            excerpt = bundle / "audition" / str(row["windows"][0]["start_sample"])
+            levels = []
+            for variant in ("predicted", "dry", "reference"):
+                samples, sr = sf.read(excerpt / f"{variant}.wav")
+                self.assertEqual((samples.shape, sr), ((12000, 2), 48000))
+                levels.append(np.sqrt(np.mean(samples**2)))
+            np.testing.assert_allclose(levels, levels[0], atol=1e-4)
             settings = json.loads((bundle / "mix.json").read_text())
             self.assertEqual([t["path"] for t in settings["tracks"]], ["take 7.wav"])
             return settings, sf.read(bundle / "preview.wav")[0], metrics["rmse_db"]
