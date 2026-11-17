@@ -24,9 +24,14 @@ def timestamp():
 def resolve(recipe_path):
     recipe = tomllib.loads(recipe_path.read_text())
     task = recipe.get("task")
+    optional = {"ram_floor_gib"}
     if task == "inspect":
         paths = ("manifest",)
         required = {"window_seconds"}
+        optional.add("input_kind")
+    elif task == "medleydb-benchmark":
+        paths = ("manifest", "checkpoint")
+        required = {"window_seconds", "windows_per_song", "input_kind"}
     elif task == "reproduce":
         paths = ("split", "cache", "checkpoint")
         required = {"cache_sha256", "checkpoint_sha256", "expected_rmse_db"}
@@ -34,7 +39,7 @@ def resolve(recipe_path):
         raise ValueError(f"unknown recipe task {task!r}")
     required.update({"task", "name", "val_frac", "seed", *paths})
     missing = required - recipe.keys()
-    extra = recipe.keys() - required - {"ram_floor_gib"}
+    extra = recipe.keys() - required - optional
     if missing or extra:
         raise ValueError(f"missing recipe keys {sorted(missing)}, unknown keys {sorted(extra)}")
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", recipe["name"]):
@@ -44,10 +49,16 @@ def resolve(recipe_path):
     recipe.setdefault("ram_floor_gib", 0)
     if not math.isfinite(recipe["ram_floor_gib"]) or recipe["ram_floor_gib"] < 0:
         raise ValueError("invalid ram_floor_gib")
-    if task == "inspect" and (
+    if "window_seconds" in recipe and (
         not math.isfinite(recipe["window_seconds"]) or recipe["window_seconds"] <= 0
     ):
         raise ValueError("window_seconds must be positive and finite")
+    if "input_kind" in recipe and recipe["input_kind"] not in ("raw", "stems"):
+        raise ValueError("input_kind must be raw or stems")
+    if "windows_per_song" in recipe and (
+        type(recipe["windows_per_song"]) is not int or recipe["windows_per_song"] < 1
+    ):
+        raise ValueError("windows_per_song must be a positive integer")
     if task == "reproduce" and set(recipe["expected_rmse_db"]) != {
         "zero",
         "training_mean",
@@ -64,6 +75,10 @@ def execute(recipe, output):
         from nmc.data.medleydb import inspect_windows
 
         inspect_windows(recipe, output)
+    elif recipe["task"] == "medleydb-benchmark":
+        from nmc.evaluation.medleydb import benchmark
+
+        benchmark(recipe, output)
     else:
         from nmc.evaluation.reproduce import inputs, reproduce
 

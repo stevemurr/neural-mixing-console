@@ -11,8 +11,10 @@ def main():
     prep = data.add_parser("prepare")
     prep.add_argument("dataset", choices=["medleydb"])
     prep.add_argument("--root", type=Path, required=True)
-    prep.add_argument("--inputs", choices=["stems", "raw"], default="stems")
-    prep.add_argument("--output", type=Path, default=Path("dmc-data/medleydb/inventory.json"))
+    prep.add_argument(
+        "--inputs", choices=["raw", "stems"], default="raw", help="input tracks (default: raw)"
+    )
+    prep.add_argument("--output", type=Path, help="default: dmc-data/medleydb/<inputs>.json")
     mix = commands.add_parser("mix", help="predict song-wide EQ and render a raw tracks folder")
     mix.add_argument("tracks_dir", type=Path)
     mix.add_argument("--checkpoint", type=Path)
@@ -47,7 +49,8 @@ def main():
         elif args.command == "data":
             from nmc.data.medleydb import prepare
 
-            prepare(args.root, args.inputs, args.output)
+            output = args.output or Path("dmc-data/medleydb") / f"{args.inputs}.json"
+            prepare(args.root, args.inputs, output)
         elif args.command == "run":
             from nmc.runner import run
 
