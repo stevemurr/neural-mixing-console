@@ -2,6 +2,9 @@
 
 import math
 from pathlib import Path
+from tempfile import TemporaryDirectory
+
+import soundfile as sf
 
 import torch
 import torch.nn.functional as F
@@ -33,6 +36,19 @@ def spectrum_db(window, console):
     return 20 * magnitude.log10()
 
 
+def save_listening_excerpt(folder, sources):
+    """Match excerpt RMS and apply common peak headroom before PCM export."""
+    matched = {
+        name: audio / audio.square().mean().clamp_min(1e-12).sqrt()
+        for name, audio in sources.items()
+    }
+    peak = max(float(audio.abs().max()) for audio in matched.values())
+    scale = 0.89 / max(peak, 1.0)
+    folder.mkdir(parents=True)
+    for name, audio in matched.items():
+        sf.write(folder / f"{name}.wav", (audio.T * scale).numpy(), RATE, subtype="PCM_16")
+
+
 def score_song(root, entry, bundle, recipe, console):
     # The product command has already persisted the controls and rendered the entire song.
     reference = read_source(root, entry["mix"]["path"]).expand(2, -1)
@@ -52,18 +68,26 @@ def score_song(root, entry, bundle, recipe, console):
             dry[idx] += audio[:, start : start + frames]
 
     rows = []
-    for idx, start in enumerate(starts):
-        target = spectrum_db(reference[:, start : start + frames], console)
-        dry_error = spectrum_db(dry[idx], console) - target
-        predicted_error = spectrum_db(preview[:, start : start + frames], console) - target
-        rows.append(
-            {
-                "start_sample": start,
-                "frames": frames,
-                "dry": float(dry_error.square().mean().sqrt()),
-                "predicted": float(predicted_error.square().mean().sqrt()),
+    with TemporaryDirectory(dir=bundle) as stage:
+        for idx, start in enumerate(starts):
+            excerpt = {
+                "reference": reference[:, start : start + frames],
+                "dry": dry[idx],
+                "predicted": preview[:, start : start + frames],
             }
-        )
+            save_listening_excerpt(Path(stage) / "audition" / str(start), excerpt)
+            target = spectrum_db(excerpt["reference"], console)
+            dry_error = spectrum_db(dry[idx], console) - target
+            predicted_error = spectrum_db(preview[:, start : start + frames], console) - target
+            rows.append(
+                {
+                    "start_sample": start,
+                    "frames": frames,
+                    "dry": float(dry_error.square().mean().sqrt()),
+                    "predicted": float(predicted_error.square().mean().sqrt()),
+                }
+            )
+        (Path(stage) / "audition").rename(bundle / "audition")
     return rows
 
 
