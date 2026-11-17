@@ -21,7 +21,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 from models.mono_pan import detect_stereo
-from scripts.precompute_v13_dataset import load_session_audio
+from nmc.data.staged import load_session_audio
 
 
 class V13ReconDataset(Dataset):
