@@ -1,0 +1,92 @@
+# grafx-distill v11b — v11 continued with 2-window val averaging
+#
+# Continues from v11's encoder_best.pt (step 1500, val L_r=2.2153, gap=1.01).
+# Trainer-side change in this run: `run_val` now renders BOTH 'a' and 'b'
+# halves of each val pair and averages per-session, reducing within-session
+# variance by ~sqrt(2). Same encoder, same loss design, same data, same
+# optimizer config as v11 — only the val measurement is less noisy.
+#
+# Motivation: v11's step-2000 val showed gap=1.97 against step-1500's 1.01.
+# Train-side losses were continuing to descend (L_d went 3.8 -> 1.2 over
+# 2000 steps), so the val regression was hard to attribute. Two possible
+# causes:
+#   (a) noisy 1-window-per-session val happened to land on bad windows,
+#       making the actual stable trajectory look like a regression
+#   (b) real degradation under sustained MR-STFT pressure post-cosine-ramp
+# Doubling val samples per session distinguishes the two cheaply.
+#
+# Warm-start specifics:
+#   - encoder weights load from v11's encoder_best.pt (the lowest-gap ckpt)
+#   - optimizer state resets (no carry-over of Adam moments — fine)
+#   - LR + loss-weight cosine ramps RESTART from step 0
+#   - shortened lr_warmup_steps (100 vs 300) since encoder isn't randomly
+#     initialised — needs less re-warmup
+#   - shortened w_cosine_ramp (200 vs 800) since encoder already saw full-
+#     weight loss for ~1400 steps; gentle re-engagement is enough
+#   - max_steps 6000 (vs v11's 8000) — we've already done equivalent of
+#     ~2200 steps' worth of work; 6000 more is plenty to see whether v11b
+#     improves on v11's best
+#
+# Output goes to a new dir so v11's artifacts stay preserved for A/B.
+
+[run]
+name = "grafx-distill-v11b"
+trainer = "grafx/training/train_grafx_distill.py"
+
+[hardware]
+ram_floor_gb = 6
+pytorch_cuda_alloc_conf = "expandable_segments:True"
+
+[train]
+# --- Warm-start from v11's best ---
+init_from = "dmc-data/checkpoints/grafx-distill-v11/encoder_best.pt"
+
+# --- Data (unchanged) ---
+staging_dir = "dmc-data/grafx-prune-data"
+sample_rate = 30000
+audio_len = 180000
+n_max = 24
+max_groups = 16
+val_frac = 0.1
+min_window_gap = 30000
+max_label_loss = 5.0
+cache_size = 4
+num_workers = 2
+pairs_per_session = 8
+
+# --- Model (unchanged) ---
+d_model = 384
+n_track_layers = 4
+
+# --- Optim — shorter warmup since warm-starting ---
+batch_size = 4
+grad_accum = 2
+max_steps = 6000             # was 8000 — we did ~2200 of v11 already
+lr = 1e-4
+lr_warmup_steps = 100        # was 300 — encoder already trained
+lr_cosine_min = 1e-5
+weight_decay = 1e-4
+grad_clip = 20.0
+
+# --- Loss (unchanged v11) ---
+w_param = 0.0
+w_cons = 0.3
+w_distill = 1.0
+w_recon = 1.0
+w_inter = 0.0
+distill_warmup = 0
+use_af_loss = false
+use_hybrid_loss = true
+w_stereo_width = 1.0
+w_stereo_imbalance = 1.0
+w_cosine_ramp = 200          # was 800 — encoder already saw full weights
+
+# --- Logging / ckpt ---
+log_every = 50
+val_every = 500
+ckpt_every = 1000
+seed = 0
+
+# --- Memory safety ---
+cuda_memory_fraction = 0.65
+use_bf16 = true

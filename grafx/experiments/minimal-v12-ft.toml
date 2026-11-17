@@ -1,0 +1,76 @@
+# minimal-v12 Phase 3 — fine-tune on real Cambridge engineer mixes (48 kHz)
+#
+# Warm-starts from Phase 2 (synth) `encoder_best.pt`. Switches the loss
+# from synth_mix supervision to engineer-mix supervision. No teacher
+# labels at all — the encoder learned how to invert MinimalConsole in
+# Phase 2; Phase 3 adapts it to engineering aesthetic.
+#
+# See notes/minimal_console_design_2026-05.md.
+
+[run]
+name = "minimal-v12-ft"
+trainer = "grafx/training/train_minimal.py"
+
+[hardware]
+ram_floor_gb = 6
+pytorch_cuda_alloc_conf = "expandable_segments:True"
+
+[train]
+mode = "finetune"
+
+# --- Warm-start from Phase 2 best ---
+init_from = "dmc-data/checkpoints/minimal-v12-synth/encoder_best.pt"
+
+# --- Data ---
+staging_dir = "dmc-data/grafx-prune-data-48k"
+sample_rate = 48000
+audio_len = 288000
+n_max = 24
+max_groups = 16
+val_frac = 0.1
+min_window_gap = 48000
+max_label_loss = 5.0         # drops 2 teacher-failure sessions (labels only
+                             # used for group_assignments + amort_gap metric)
+cache_size = 4
+num_workers = 2
+pairs_per_session = 8
+
+# --- Model (same as synth phase) ---
+d_model = 384
+n_track_layers = 4
+
+# --- Optim — shorter warmup since warm-starting ---
+# Match Phase 2's batch (see synth toml for rationale).
+batch_size = 6
+grad_accum = 1
+max_steps = 6000
+lr = 1e-4
+lr_warmup_steps = 100        # encoder is warm — short re-warmup
+lr_cosine_min = 1e-5
+weight_decay = 1e-4
+grad_clip = 20.0
+
+# --- Loss (no L_param — no ground-truth params for real engineer mixes) ---
+# Phase 3 uses the same hybrid MR-STFT + full Diff-MST AF feature set
+# the synth phase used. Exact paper weights.
+w_param = 0.0                # off; the trainer's synth-mode L_param path
+                             # is gated on mode=synth anyway
+w_cons = 0.3
+w_recon = 1.0
+w_rms = 0.1                  # Diff-MST paper
+w_crest = 0.001              # Diff-MST paper
+w_spec = 0.1                 # Diff-MST paper (bark→log-mel)
+w_stereo_width = 1.0         # Diff-MST paper
+w_stereo_imbalance = 1.0     # Diff-MST paper
+w_af = 1.0
+w_cosine_ramp = 200          # short ramp — encoder already saw audio losses
+
+# --- Logging / ckpt ---
+log_every = 50
+val_every = 500
+ckpt_every = 1000
+seed = 0
+
+# --- Memory safety ---
+cuda_memory_fraction = 0.75
+use_bf16 = true

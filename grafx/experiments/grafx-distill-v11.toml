@@ -1,0 +1,91 @@
+# grafx-distill v11 — hybrid loss (MR-STFT + AF stereo)
+#
+# Single experimental delta vs v9: loss design.
+#   v9:  use_af_loss=true        (5-feature Diff-MST AF)
+#   v11: use_hybrid_loss=true    (MR-STFT + AF stereo width/imbalance only)
+#
+# Motivation — v9/v10 audition (2026-05-26):
+#
+#   On 3 random val sessions, v9's encoder_best.pt gives:
+#     student_vs_engineer_mrstft:  2.02–3.31
+#     sum_baseline_vs_engineer:    1.47–2.52     ← BASELINE BEATS STUDENT
+#     teacher_vs_engineer:         0.72–1.43
+#   But on the AF metric the student is "fine" (af 0.12–0.18).
+#
+#   Diagnosis: AF loss satisfied stereo + dynamics + coarse mel-spectrum,
+#   but doesn't pin down fine spectral detail. The student lands in mixes
+#   that have right loudness/stereo profile but wrong tonal balance —
+#   MR-STFT magnitude (which DOES see fine spectrum) penalizes that
+#   harder than even the sum baseline.
+#
+# Fix: combine.
+#   - MR-STFT carries full-spectrum supervision (the teacher's own loss).
+#   - AF stereo width + imbalance carry sign-preserving stereo gradient
+#     (escapes the mono fixed point that MR-STFT magnitude can't see).
+#   - Drop AF rms/crest/spec — MR-STFT covers those implicitly.
+#
+# Cold-start from random init. Capacity reverts to v9 baseline (d_model=384,
+# n_track_layers=4) — v10 already showed bigger encoder doesn't help, so we
+# go back to the smaller cheaper model and change the loss.
+#
+# Everything else (data, ramp schedule, bf16, batch, max_steps): identical
+# to v9 to keep the A/B clean.
+
+[run]
+name = "grafx-distill-v11"
+trainer = "grafx/training/train_grafx_distill.py"
+
+[hardware]
+ram_floor_gb = 6
+pytorch_cuda_alloc_conf = "expandable_segments:True"
+
+[train]
+# --- Data (unchanged from v9) ---
+staging_dir = "dmc-data/grafx-prune-data"
+sample_rate = 30000
+audio_len = 180000
+n_max = 24
+max_groups = 16
+val_frac = 0.1
+min_window_gap = 30000
+max_label_loss = 5.0
+cache_size = 4
+num_workers = 2
+pairs_per_session = 8
+
+# --- Model (revert to v9 size — v10 disproved capacity-bound hypothesis) ---
+d_model = 384
+n_track_layers = 4
+
+# --- Optim (unchanged from v9) ---
+batch_size = 4
+grad_accum = 2
+max_steps = 8000
+lr = 1e-4
+lr_warmup_steps = 300
+lr_cosine_min = 1e-5
+weight_decay = 1e-4
+grad_clip = 20.0
+
+# --- Loss (CHANGE: hybrid MR-STFT + AF stereo) ---
+w_param = 0.0                 # still dropped
+w_cons = 0.3                  # unchanged window-stability regularizer
+w_distill = 1.0               # weight applied to hybrid total for L_distill
+w_recon = 1.0                 # weight applied to hybrid total for L_recon
+w_inter = 0.0                 # still dropped (gauge-degenerate per v8 finding)
+distill_warmup = 0
+use_af_loss = false           # mutually exclusive with hybrid
+use_hybrid_loss = true        # MR-STFT + AF stereo width/imbalance
+w_stereo_width = 1.0          # inside HybridReconLoss
+w_stereo_imbalance = 1.0      # inside HybridReconLoss
+w_cosine_ramp = 800           # same as v9 — smooth onset
+
+# --- Logging / ckpt ---
+log_every = 50
+val_every = 500
+ckpt_every = 1000
+seed = 0
+
+# --- Memory safety ---
+cuda_memory_fraction = 0.65
+use_bf16 = true

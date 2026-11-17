@@ -1,0 +1,101 @@
+# grafx-distill v8 — audio-only training, Diff-MST AF loss
+#
+# Loss redesign driven by the 2026-05-25 literature review (see
+# notes/distillation_research_2026-05.md):
+#
+#   - Drop L_param entirely. Within-class EQ variance ≈ across-class,
+#     teacher's 1024-bin EQ is gauge-degenerate, v6/v7 empirically showed
+#     L_param plateaus then drifts as L_distill takes over. Marino's
+#     amortized-optimization framework: objective-based losses are
+#     preferred when solutions are non-unique. Diff-MST (ISMIR 2024)
+#     explicitly skips parameter loss on the same grounds.
+#
+#   - Add L_recon against the ENGINEER MIX. The teacher's whole job was
+#     to minimize MR-STFT vs engineer mix; the student should train on
+#     the same objective. Currently we only see the teacher's render
+#     (L_distill), which is a bottleneck — student can't exceed the
+#     teacher on songs where the teacher converged poorly (we have
+#     2 outliers at final_test_loss > 5, many at 1-2 that could be
+#     beaten).
+#
+#   - Switch both L_distill and L_recon to AudioFeatureLoss (Diff-MST
+#     5-feature style: RMS + crest + log-mel + stereo width + stereo
+#     imbalance, with stereo features 10x spectral). MR-STFT magnitude
+#     is sign-invariant on the side channel; AF gives a sign-preserving
+#     gradient at the mono fixed point. Smoke-tested 2026-05-25.
+#
+# Carried from v7:
+#   - bf16 encoder (autocast(bfloat16) on encoder, cast outputs to fp32
+#     before console). 2x speedup, 30% less memory.
+#   - batch_size=4, grad_accum=2 -> effective B = 16 forward exs/opt step.
+#   - cuda_memory_fraction=0.65 hard cap (NVRM-OOM protection).
+#   - Cosine LR + warmup.
+
+[run]
+name = "grafx-distill-v8"
+trainer = "grafx/training/train_grafx_distill.py"
+
+[hardware]
+ram_floor_gb = 6
+pytorch_cuda_alloc_conf = "expandable_segments:True"
+
+[train]
+# --- Data (unchanged from v7) ---
+staging_dir = "dmc-data/grafx-prune-data"
+sample_rate = 30000
+audio_len = 180000
+n_max = 24
+max_groups = 16
+val_frac = 0.1
+min_window_gap = 30000
+max_label_loss = 5.0
+cache_size = 4
+num_workers = 2
+pairs_per_session = 8
+
+# --- Model (unchanged) ---
+d_model = 384
+n_track_layers = 4
+
+# --- Optim (mostly unchanged) ---
+batch_size = 4
+grad_accum = 2
+max_steps = 8000
+lr = 1e-4
+lr_warmup_steps = 300
+lr_cosine_min = 1e-5
+weight_decay = 1e-4
+grad_clip = 20.0
+
+# --- Loss (NEW — audio-only via AF loss + FitNets intermediate) ---
+w_param = 0.0                # DROPPED — gauge-degenerate target, see header
+w_cons = 0.3                 # unchanged — window-stability regularizer
+w_distill = 1.0              # AF loss vs teacher render (sound like teacher)
+w_recon = 1.0                # AF loss vs engineer mix (sound like engineer);
+                             # equal weight — neither signal dominates a priori,
+                             # retune empirically if one drowns the other
+w_inter = 0.5                # FitNets-style intermediate audio matching
+                             # (after EQ, after comp, after stereo_imager, …).
+                             # Denser supervision — student learns teacher's
+                             # process not just its output. Half the weight
+                             # of w_distill since intermediates are dense.
+distill_warmup = 0           # superseded by w_cosine_ramp below
+use_af_loss = true           # AudioFeatureLoss (Diff-MST 5-feature) for
+                             # both distill and recon. Single switch.
+w_cosine_ramp = 800          # smoothly ramp w_distill/w_recon/w_inter from
+                             # 0 to target over 800 steps (~10% of max_steps).
+                             # Replaces v7's step-piecewise distill_warmup
+                             # which caused the val L_distill spike at the
+                             # ramp boundary; cosine half-wave has continuous
+                             # derivative so Adam's v_t adapts gradually.
+# whiten_labels left default; ignored when w_param=0.
+
+# --- Logging / ckpt ---
+log_every = 50
+val_every = 500
+ckpt_every = 1000
+seed = 0
+
+# --- Memory safety (unchanged) ---
+cuda_memory_fraction = 0.65
+use_bf16 = true

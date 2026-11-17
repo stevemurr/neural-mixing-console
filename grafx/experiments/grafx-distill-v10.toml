@@ -1,0 +1,86 @@
+# grafx-distill v10 — capacity test (v9 + bigger encoder)
+#
+# Single experimental delta vs v9: encoder capacity ~2.4× larger.
+#   d_model:        384 → 512   (1.8× transformer width)
+#   n_track_layers:  4  → 6     (1.5× transformer depth)
+# Expected param count: ~70–80 M (vs v9's 30 M; vs Diff-MST's 190 M).
+#
+# Everything else identical to v9: same data, loss family, weights,
+# schedule, batch size, bf16, cosine ramp. No L_inter, no L_param.
+#
+# Hypothesis (see notes/capacity_research_2026-05.md):
+#   v9 plateaued at val L_r ≈ 0.57 over steps 1500–4000. Train-side
+#   losses are tiny (0.1) while val sits at 0.5 — stable 5× train/val
+#   gap that's not widening. This is the signature of representational
+#   ceiling at fixed capacity, not overfit.
+#
+#   If v10 descends meaningfully below 0.572 → capacity was the
+#   bottleneck. If v10 plateaus at the same value → we have a different
+#   problem (MERT prior, ref_mix privileged info, or loss-design
+#   ceiling) and the next experiment targets that.
+#
+# Cold-start: v9's d_model=384 weights don't transfer cleanly to
+# d_model=512, so warm-starting would muddy the comparison anyway.
+#
+# Memory: v9 ran at ~60–65 GB peak with 10–18 GB headroom under the 78 GB
+# cap. d_model 384→512 adds ~30% to peak; should land around 75–80 GB —
+# at the cap. If we OOM, drop batch_size to 3 and bump grad_accum to 3
+# to preserve effective batch.
+
+[run]
+name = "grafx-distill-v10"
+trainer = "grafx/training/train_grafx_distill.py"
+
+[hardware]
+ram_floor_gb = 6
+pytorch_cuda_alloc_conf = "expandable_segments:True"
+
+[train]
+# --- Data (unchanged from v9) ---
+staging_dir = "dmc-data/grafx-prune-data"
+sample_rate = 30000
+audio_len = 180000
+n_max = 24
+max_groups = 16
+val_frac = 0.1
+min_window_gap = 30000
+max_label_loss = 5.0
+cache_size = 4
+num_workers = 2
+pairs_per_session = 8
+
+# --- Model (CHANGE: bigger encoder) ---
+d_model = 512                # was 384 — 1.8× transformer width
+n_track_layers = 6           # was 4   — 1.5× depth
+# mert_dim left default (0) — see notes/capacity_research_2026-05.md
+#   on why semantic priors aren't expected to be the bottleneck here.
+
+# --- Optim (unchanged from v9) ---
+batch_size = 4
+grad_accum = 2
+max_steps = 8000
+lr = 1e-4
+lr_warmup_steps = 300
+lr_cosine_min = 1e-5
+weight_decay = 1e-4
+grad_clip = 20.0
+
+# --- Loss (unchanged from v9 — audio-only, no L_inter) ---
+w_param = 0.0
+w_cons = 0.3
+w_distill = 1.0
+w_recon = 1.0
+w_inter = 0.0
+distill_warmup = 0
+use_af_loss = true
+w_cosine_ramp = 800
+
+# --- Logging / ckpt ---
+log_every = 50
+val_every = 500
+ckpt_every = 1000
+seed = 0
+
+# --- Memory safety ---
+cuda_memory_fraction = 0.65
+use_bf16 = true
