@@ -13,6 +13,16 @@ def main():
     prep.add_argument("--root", type=Path, required=True)
     prep.add_argument("--inputs", choices=["stems", "raw"], default="stems")
     prep.add_argument("--output", type=Path, default=Path("dmc-data/medleydb/inventory.json"))
+    mix = commands.add_parser("mix", help="predict song-wide EQ and render a raw tracks folder")
+    mix.add_argument("tracks_dir", type=Path)
+    mix.add_argument("--checkpoint", type=Path)
+    mix.add_argument(
+        "--out-dir", type=Path, help="new output folder (default: sibling <tracks>-mix)"
+    )
+    render = commands.add_parser("render", help="replay editable mix settings")
+    render.add_argument("tracks_dir", type=Path)
+    render.add_argument("settings", type=Path)
+    render.add_argument("--output", type=Path, required=True)
     launch = commands.add_parser("run")
     launch.add_argument("recipe", type=Path)
     launch.add_argument("--check", action="store_true")
@@ -21,7 +31,20 @@ def main():
     listing.add_argument("--runs-dir", type=Path, default=Path("runs"))
     args = parser.parse_args()
     try:
-        if args.command == "data":
+        if args.command == "mix":
+            from nmc.mix import DEFAULT_CHECKPOINT, mix_folder
+
+            root = args.tracks_dir.resolve()
+            mix_folder(
+                root,
+                args.checkpoint or DEFAULT_CHECKPOINT,
+                args.out_dir or root.with_name(root.name + "-mix"),
+            )
+        elif args.command == "render":
+            from nmc.mix import replay
+
+            replay(args.tracks_dir, args.settings, args.output)
+        elif args.command == "data":
             from nmc.data.medleydb import prepare
 
             prepare(args.root, args.inputs, args.output)

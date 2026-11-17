@@ -109,3 +109,12 @@ class TargetCurveNet(nn.Module):
 
 
 __all__ = ["TargetCurveNet"]
+
+
+def load_predictor(path):
+    """Restore a v13 target-curve checkpoint on CPU for inference."""
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    keys = ("n_bins", "d_model", "n_layers", "n_heads", "ffn_mult", "dropout", "max_delta_db")
+    net = TargetCurveNet(**{k: checkpoint["args"][k] for k in keys}).eval()
+    net.load_state_dict(checkpoint["model"])
+    return net
