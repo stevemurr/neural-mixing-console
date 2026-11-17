@@ -6,6 +6,7 @@ from importlib.resources import files
 import json
 from pathlib import Path
 import re
+import socket
 from urllib.parse import quote, unquote, urlsplit
 
 import numpy as np
@@ -196,12 +197,13 @@ class Handler(BaseHTTPRequestHandler):
                     remaining -= len(block)
 
 
-def serve(root: Path, port):
+def serve(root: Path, port, *, host="127.0.0.1"):
     root = root.resolve(strict=True)
-    with ThreadingHTTPServer(("127.0.0.1", port), Handler) as server:
+    with ThreadingHTTPServer((host, port), Handler) as server:
         server.root = root
         _, server.media = catalog(root)
-        print(f"Audition at http://127.0.0.1:{server.server_port}/", flush=True)
+        address = socket.gethostname() if server.server_address[0] == "0.0.0.0" else host
+        print(f"Audition at http://{address}:{server.server_port}/", flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:

@@ -31,6 +31,9 @@ def main():
     launch.add_argument("--runs-dir", type=Path, default=Path("runs"))
     listen = commands.add_parser("audition", help="listen to experiment runs in your browser")
     listen.add_argument("--runs-dir", type=Path, default=Path("runs"))
+    listen.add_argument(
+        "--host", default="127.0.0.1", help="IPv4 bind address (0.0.0.0 for network access)"
+    )
     listen.add_argument("--port", type=int, default=8766)
     listing = commands.add_parser("runs").add_subparsers(required=True).add_parser("list")
     listing.add_argument("--runs-dir", type=Path, default=Path("runs"))
@@ -39,7 +42,7 @@ def main():
         if args.command == "audition":
             from nmc.audition import serve
 
-            serve(args.runs_dir, args.port)
+            serve(args.runs_dir, args.port, host=args.host)
         elif args.command == "mix":
             from nmc.mix import DEFAULT_CHECKPOINT, mix_folder
 
