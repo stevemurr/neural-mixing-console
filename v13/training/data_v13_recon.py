@@ -102,13 +102,8 @@ class V13ReconDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         sess, start = self.examples[idx]
         data = self._get_session(sess)
-        # If a session fails to load mid-training, fall back to first example.
-        # (Should be rare; happens only if disk failure or file corruption.)
         if data is None:
-            sess, start = self.examples[0]
-            data = self._get_session(sess)
-            if data is None:
-                raise RuntimeError(f"failed to load fallback session {sess}")
+            raise RuntimeError(f"failed to load requested session {sess}")
 
         stems_full = data["stems"]                          # (N_total, 2, T_actual)
         mix_full = data["mix"]                              # (2, T_actual)

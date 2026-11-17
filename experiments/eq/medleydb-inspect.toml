@@ -1,0 +1,7 @@
+name = "medleydb-inspect"
+task = "inspect"
+manifest = "dmc-data/medleydb/inventory.json"
+window_seconds = 1.0
+seed = 0
+val_frac = 0.1
+ram_floor_gib = 4

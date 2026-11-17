@@ -47,6 +47,9 @@ realtime = [
     "sounddevice>=0.5",
 ]
 
+[project.scripts]
+nmc = "nmc.cli:main"
+
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
