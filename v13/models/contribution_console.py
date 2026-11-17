@@ -12,14 +12,9 @@ Architecture (notes/v13_contribution_mixer_design.md):
        active-frame mel-magnitude aggregation used in the separability
        analysis (active_pct=0.20 by default).
 
-    2. Distribute the mix-bus delta across tracks weighted by share at
-       each bin:
-            per_track_delta_db[b, t] = target_delta_db[b]
-                                       * C[b, t] / Σ_t' C[b, t']
-
-       Tracks with high contribution at the problem band absorb most of
-       the change; near-silent tracks at that band get near-zero change.
-       This is the closed-form distribution policy.
+    2. Convert contributions to linear magnitude and solve for per-track
+       gain factors that minimize squared movement from unity subject to
+       the requested aggregate magnitude. See distribute_delta below.
 
     3. Apply per-track 26-band mel EQ (gain-invariant — pure spectral
        shape, no level effect).
