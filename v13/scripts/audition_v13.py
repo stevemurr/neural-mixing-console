@@ -49,7 +49,7 @@ from models.mono_pan import detect_stereo
 from models.pan_assignment import balanced_assignment
 from models.pan_net import PanNet
 from models.target_curve_net import TargetCurveNet
-from scripts.precompute_v13_dataset import load_session_audio
+from nmc.data.staged import load_session_audio
 from training.data_v13 import session_split
 
 

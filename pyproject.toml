@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "Differentiable mixing graph + multitrack encoder for learning audio mixing from engineer reference mixes."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "TODO" }   # pick a license; note the source datasets carry their own (Cambridge-MT is non-commercial).
 authors = [{ name = "Steve Murr" }]
 
 dependencies = [
@@ -48,12 +47,12 @@ realtime = [
     "sounddevice>=0.5",
 ]
 
-# This is an application/research codebase, not an installable library — uv
-# installs the dependencies into the venv but does not "build" the project
-# itself. Modules are run via `python training/train_stage3.py`, `python infer.py`,
-# etc. (each sets up its own sys.path).
-[tool.uv]
-package = false
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.ruff]
 line-length = 100

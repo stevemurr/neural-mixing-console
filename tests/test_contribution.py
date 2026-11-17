@@ -1,7 +1,7 @@
 import unittest
 
 import torch
-from v13.models.contribution_console import ContributionConsole
+from nmc.eq.contribution_console import ContributionConsole
 
 
 class ContributionTests(unittest.TestCase):

@@ -40,7 +40,7 @@ from models.contribution_console import ContributionConsole
 from models.group_classification import classify_group_name
 from models.mono_pan import detect_stereo, recover_pan_targets
 from models.pan_net import PanNet
-from scripts.precompute_v13_dataset import load_session_audio
+from nmc.data.staged import load_session_audio
 from training.data_v13 import session_split
 
 
