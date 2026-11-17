@@ -1,6 +1,6 @@
 """Replay the frozen v13 feature-cache experiment from the repository root."""
+
 import argparse
-import hashlib
 import json
 import math
 from pathlib import Path
@@ -10,11 +10,7 @@ import torch
 
 from nmc.eq.target_curve_net import TargetCurveNet
 from nmc.data.splits import session_split
-
-
-def fingerprint(path):
-    with Path(path).open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
+from nmc.records import fingerprint
 
 
 def inputs(recipe):
@@ -43,23 +39,39 @@ def reproduce(recipe, output=None):
     validation = [e for e in examples if e["session"] in val]
     rows = []
     for start in range(0, len(validation), 32):
-        batch = validation[start:start + 32]
-        predicted = net(torch.stack([e["C"] for e in batch]),
-                        torch.stack([e["track_mask"] for e in batch]))
+        batch = validation[start : start + 32]
+        predicted = net(
+            torch.stack([e["C"] for e in batch]), torch.stack([e["track_mask"] for e in batch])
+        )
         for e, curve in zip(batch, predicted):
             target = e["target_delta_db"]
             errors = {"zero": target, "training_mean": mean - target, "learned": curve - target}
-            rows.append({"song": e["session"], "start_sample": int(e["window_start"]),
-                         "mse_db2": {k: float(x.square().mean()) for k, x in errors.items()}})
+            rows.append(
+                {
+                    "song": e["session"],
+                    "start_sample": int(e["window_start"]),
+                    "mse_db2": {k: float(x.square().mean()) for k, x in errors.items()},
+                }
+            )
+
     def scores(records):
-        return {k: math.sqrt(sum(r["mse_db2"][k] for r in records) / len(records))
-                for k in ("zero", "training_mean", "learned")}
-    result = {"rmse_db": scores(rows), "train": sorted(train), "validation": sorted(val),
-              "per_song_rmse_db": {s: scores([r for r in rows if r["song"] == s]) for s in sorted(val)},
-              "windows": rows}
+        return {
+            k: math.sqrt(sum(r["mse_db2"][k] for r in records) / len(records))
+            for k in ("zero", "training_mean", "learned")
+        }
+
+    result = {
+        "rmse_db": scores(rows),
+        "train": sorted(train),
+        "validation": sorted(val),
+        "per_song_rmse_db": {s: scores([r for r in rows if r["song"] == s]) for s in sorted(val)},
+        "windows": rows,
+    }
     if output:
         Path(output).write_text(json.dumps(result, indent=2) + "\n")
-    print(f"{len(train)} training songs, {len(val)} validation songs, {len(rows)} validation windows")
+    print(
+        f"{len(train)} training songs, {len(val)} validation songs, {len(rows)} validation windows"
+    )
     for k, value in result["rmse_db"].items():
         print(f"{k:>14}: {value:.6f} dB")
         if not math.isclose(value, recipe["expected_rmse_db"][k], abs_tol=0.0005):

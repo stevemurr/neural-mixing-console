@@ -38,24 +38,15 @@ from __future__ import annotations
 
 import argparse
 import os
-import subprocess
 import sys
-import threading
-import time
 import tomllib
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-
-
-def _mem_available_gib() -> float:
-    try:
-        for line in Path("/proc/meminfo").read_text().splitlines():
-            if line.startswith("MemAvailable:"):
-                return int(line.split()[1]) / (1024.0 * 1024.0)
-    except OSError:
-        pass
-    return float("inf")
+# This historical launcher also supports a system Python with --python pointing
+# to a separate training environment. Its process helper is standard-library only.
+sys.path.insert(0, str(REPO_ROOT / "src"))
+from nmc.process import run_logged  # noqa: E402
 
 
 def _build_cmd(cfg: dict, python: str) -> tuple[list[str], str, Path]:
@@ -117,43 +108,7 @@ def main() -> int:
     if watchdog_on:
         print(f"[run] watchdog:   SIGTERM trainer if MemAvailable < {ram_floor:g} GiB")
 
-    log_f = open(log_path, "w", buffering=1)
-    proc = subprocess.Popen(
-        cmd, cwd=str(REPO_ROOT), env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1, text=True,
-    )
-
-    stop = threading.Event()
-
-    def _watchdog() -> None:
-        while not stop.wait(5.0):
-            if proc.poll() is not None:
-                return
-            avail = _mem_available_gib()
-            if avail < ram_floor:
-                msg = (f"[watchdog] MemAvailable {avail:.1f} GiB < {ram_floor:g} GiB floor "
-                       f"— SIGTERM trainer (pid {proc.pid})\n")
-                sys.stdout.write(msg); sys.stdout.flush()
-                log_f.write(msg); log_f.flush()
-                proc.terminate()
-                time.sleep(30)
-                if proc.poll() is None:
-                    proc.kill()
-                return
-
-    wd = threading.Thread(target=_watchdog, daemon=True) if watchdog_on else None
-    if wd:
-        wd.start()
-    try:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            sys.stdout.write(line); sys.stdout.flush()
-            log_f.write(line); log_f.flush()
-        proc.wait()
-    finally:
-        stop.set()
-        log_f.close()
-    return proc.returncode
+    return run_logged(cmd, REPO_ROOT, env, log_path, ram_floor if watchdog_on else 0)
 
 
 if __name__ == "__main__":
