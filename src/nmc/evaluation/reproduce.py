@@ -8,7 +8,7 @@ import tomllib
 
 import torch
 
-from nmc.eq.target_curve_net import TargetCurveNet
+from nmc.eq.target_curve_net import load_predictor
 from nmc.data.splits import session_split
 from nmc.records import fingerprint
 
@@ -18,16 +18,13 @@ def inputs(recipe):
         if fingerprint(recipe[key]) != recipe[key + "_sha256"]:
             raise ValueError(f"{key} fingerprint mismatch: {recipe[key]}")
     examples = torch.load(recipe["cache"], map_location="cpu", weights_only=True)
-    checkpoint = torch.load(recipe["checkpoint"], map_location="cpu", weights_only=True)
     train, val = session_split([e["session"] for e in examples], recipe["val_frac"], recipe["seed"])
     if not train or not val:
         raise ValueError("Both training and validation songs are required")
     expected = json.loads(Path(recipe["split"]).read_text())
     if expected != {"train": sorted(train), "validation": sorted(val)}:
         raise ValueError("Historical split membership mismatch")
-    keys = ("n_bins", "d_model", "n_layers", "n_heads", "ffn_mult", "dropout", "max_delta_db")
-    net = TargetCurveNet(**{k: checkpoint["args"][k] for k in keys}).eval()
-    net.load_state_dict(checkpoint["model"])
+    net = load_predictor(recipe["checkpoint"])
     return examples, train, val, net
 
 
