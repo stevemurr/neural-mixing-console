@@ -1,6 +1,7 @@
 name = "medleydb-inspect"
 task = "inspect"
-manifest = "dmc-data/medleydb/inventory.json"
+manifest = "dmc-data/medleydb/raw.json"
+input_kind = "raw"
 window_seconds = 1.0
 seed = 0
 val_frac = 0.1

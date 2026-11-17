@@ -34,16 +34,22 @@ The original local cache and checkpoint are required. Their paths and hashes are
 
 Every launch creates `runs/<recipe>/<run-id>/`. Open `run.json` for the command’s outcome, revision, working-tree state, input fingerprints and split fingerprint. The resolved settings are in `recipe.json`, the worker output in `run.log`, and the song IDs, window offsets and measurements in `metrics.json`. The reproduction recipe records the original checkpoint by path and hash. `--check` reads the inputs without allocating a run directory. Relative input paths are resolved from the current working directory.
 
-## Prepare and inspect MedleyDB audio
+## Benchmark on raw MedleyDB tracks
 
-    uv run nmc data prepare medleydb --root /path/to/MedleyDB
-    uv run nmc run experiments/eq/medleydb-inspect.toml --check
-    uv run nmc run experiments/eq/medleydb-inspect.toml
+Run from the repository root on the extracted dataset:
+
+    uv run nmc data prepare medleydb --inputs raw --root /path/to/MedleyDB
+    uv run nmc run experiments/eq/medleydb-raw.toml --check
+    uv run nmc run experiments/eq/medleydb-raw.toml
     uv run nmc runs list
 
-Preparation inventories grouped stems by default. Pass `--inputs raw` to inventory raw tracks. Each inventory records the reference mix, selected files, rates, channel counts, common usable length and named exclusions. Adjacent song metadata defines the expected inputs when available. With audio-only distributions the inventory covers the files present on disk. Review exclusions and regenerate the inventory after the download finishes. File sizes and modification times are recorded to detect changed audio. The tracked run snapshots the inventory.
+Raw tracks are the default and produce `dmc-data/medleydb/raw.json`. The inventory records each song's selected audio, reference, common usable length and exclusions. Review exclusions and regenerate after the download finishes. Adjacent metadata can check expected files. Audio-only folders use the audio files present. For a grouped-stem diagnostic, prepare with `--inputs stems` to write `stems.json` and set both `manifest` and `input_kind` in a copy of the recipe. Existing inventories can be used by pointing a recipe at their path.
 
-The inspection recipe probes one centered window per accepted song at its native rate, duplicates mono inputs to stereo, and exports one float-WAV dry sum and reference pair per fold. The metrics give the exact source offsets. This recipe checks ingestion and audition export. The five-way EQ research comparison is a separate experiment.
+The recipe assigns each canonical MedleyDB song ID to a fold using the shared split seed and validation fraction. Every window and input variant inherits the song's assignment. Keep those split settings fixed across comparisons. The run records the actual membership. When variants have different exclusions, compare results on their shared held-out songs.
+
+For each validation song the benchmark runs the same folder inference as `nmc mix`. Only the raw audio directory and checkpoint go to the predictor. It writes the controls and full preview under `songs/<song>/`. The evaluator then reads the engineer mix and compares the preview and dry sum on the same three six-second windows. Short songs use the available duration. The metric is RMS-matched spectral RMSE in dB over 26 active-frame mel bands. Smaller values indicate closer tonal shape. The report records the window offsets at 48 kHz, per-song errors and equal-song-weighted aggregate errors in `metrics.json`.
+
+For a faster ingestion check with native-rate listening exports, run `experiments/eq/medleydb-inspect.toml` on the raw inventory.
 
 ## Development and history
 

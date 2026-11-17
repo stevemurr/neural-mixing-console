@@ -7,6 +7,7 @@ import numpy as np
 import soundfile as sf
 import yaml
 
+from nmc.data.raw_folder import discover
 from nmc.data.splits import session_split
 from nmc.records import write_json
 
@@ -24,8 +25,7 @@ def _inputs(folder, song, kind):
             raise ValueError("invalid or duplicate input filename in metadata")
         files = [directory / n for n in sorted(names)]
     else:
-        pattern = "STEM" if kind == "stems" else "RAW"
-        files = sorted(directory.glob(f"{song}_{pattern}_*.wav"))
+        files = [directory / name for name in discover(directory)]
     if not files:
         raise ValueError(f"no {kind} in {directory}")
     return files
@@ -90,11 +90,16 @@ def prepare(root, kind, output):
         raise ValueError("no usable songs; see inventory exclusions")
 
 
-def _read(root, track, start, frames):
+def check_source(root, track):
     path = root / track["path"]
     stat = path.stat()
     if (stat.st_size, stat.st_mtime_ns) != (track["size"], track["mtime_ns"]):
         raise ValueError(f"audio changed since preparation: {path}")
+    return path
+
+
+def _read(root, track, start, frames):
+    path = check_source(root, track)
     data, sr = sf.read(path, start=start, frames=frames, always_2d=True, dtype="float32")
     if (
         sr != track["rate"]
@@ -105,16 +110,28 @@ def _read(root, track, start, frames):
     return np.broadcast_to(data, (frames, 2))
 
 
-def inspect_windows(recipe, output=None):
-    """Read a centered window per song. Export one listening pair per fold."""
+def load_split(recipe):
+    """Assign folds by the canonical song folder name, before selecting any windows."""
     inventory = json.loads(Path(recipe["manifest"]).read_text())
+    kind = inventory["input_kind"]
+    if "input_kind" in recipe and kind != recipe["input_kind"]:
+        raise ValueError(
+            f"recipe requires {recipe['input_kind']} inputs; inventory contains {kind}"
+        )
     songs = inventory["songs"]
     train, val = session_split(list(songs), recipe["val_frac"], recipe["seed"])
     if not train or not val:
         raise ValueError(f"split has {len(train)} training and {len(val)} validation songs")
-    report = {"train": sorted(train), "validation": sorted(val), "windows": []}
+    return inventory, {"train": sorted(train), "validation": sorted(val)}
+
+
+def inspect_windows(recipe, output=None):
+    """Read a centered window per song. Export one listening pair per fold."""
+    inventory, folds = load_split(recipe)
+    songs = inventory["songs"]
+    report = {**folds, "input_kind": inventory["input_kind"], "windows": []}
     root = Path(inventory["root"])
-    for fold, members in (("train", sorted(train)), ("validation", sorted(val))):
+    for fold, members in folds.items():
         for idx, song in enumerate(members):
             entry = songs[song]
             rate = entry["mix"]["rate"]
@@ -148,4 +165,6 @@ def inspect_windows(recipe, output=None):
             report["windows"].append(row)
     if output:
         write_json(output / "metrics.json", report)
-    print(f"Read {len(train)} training and {len(val)} validation song windows")
+    print(
+        f"Read {len(folds['train'])} training and {len(folds['validation'])} validation song windows"
+    )
