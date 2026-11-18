@@ -1,0 +1,15 @@
+name = "reproduce-target-curve"
+task = "reproduce"
+ram_floor_gib = 4
+cache = "dmc-data/v13_precomputed.pt"
+checkpoint = "dmc-data/checkpoints/v13-target-curve/target_curve_best.pt"
+cache_sha256 = "1856c3de662b89f6d1655d973193b81b9478b464a8f3ea24510f8ac24eb1ec32"
+checkpoint_sha256 = "57092cec153d5ab57187d0c68a86ff86abb56bdb2f036f745341e04906e4b70c"
+split = "experiments/eq/target-curve-split.json"
+seed = 0
+val_frac = 0.1
+
+[expected_rmse_db]
+zero = 4.308823
+training_mean = 3.854812
+learned = 3.846494

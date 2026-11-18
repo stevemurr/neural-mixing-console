@@ -1,4 +1,4 @@
-"""Replay the frozen v13 feature-cache experiment from the repository root."""
+"""Replay the frozen target-curve feature-cache experiment from the repository root."""
 
 import argparse
 import json

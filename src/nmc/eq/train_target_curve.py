@@ -1,26 +1,8 @@
-"""Stage 2 trainer for the v13 contribution-mixer architecture.
-
-Supervised regression: per-track contribution vectors C → mix-bus dB
-delta. Tiny model (1.8 M params), tiny in-memory dataset (~14 MB
-precomputed). Trains in minutes on a single GPU.
-
-Loss is Huber on the dB delta (smooth L1, β=2 dB). Below 2 dB error
-the gradient is quadratic (smooth); above 2 dB it is linear (robust to
-weird sessions). Mix-bus EQ moves are mostly in [-6, +6] dB, so β=2
-matches the engineering scale.
-
-Per-bin MSE is also tracked to spot which mel bands the model gets
-right (typically low-mid, where mix decisions concentrate) vs which
-are noisy.
-
-Run via shared/run.py:
-    uv run python shared/run.py v13/experiments/v13-target-curve.toml
-"""
+"""Train the mix-wide EQ curve predictor on reference-derived targets."""
 
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import math
 import sys
@@ -32,9 +14,9 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from models.target_curve_net import TargetCurveNet
-from training.data_v13 import V13Dataset, collate_v13, session_split
+from nmc.data.splits import session_split
+from nmc.eq.dataset import TargetCurveDataset, collate_examples
+from nmc.eq.target_curve_net import TargetCurveNet
 
 
 def make_lr_schedule(
@@ -84,9 +66,12 @@ def evaluate(
     }
 
 
-def main() -> int:
+def main(
+    *, default_cache: str = "dmc-data/eq/target-curve-examples.pt",
+    checkpoint_prefix: str = "target-curve",
+) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--precomputed", default="dmc-data/v13_precomputed.pt")
+    ap.add_argument("--precomputed", default=default_cache)
     ap.add_argument("--out-dir", default=None)
     ap.add_argument("--tb-logdir", default=None)
     ap.add_argument("--device", default=None)
@@ -123,7 +108,7 @@ def main() -> int:
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     torch.manual_seed(args.seed)
 
-    out_dir = Path(args.out_dir or f"dmc-data/checkpoints/v13-target-curve-{int(time.time())}")
+    out_dir = Path(args.out_dir or f"dmc-data/checkpoints/{checkpoint_prefix}-{int(time.time())}")
     out_dir.mkdir(parents=True, exist_ok=True)
     tb_dir = Path(args.tb_logdir or f"runs/{out_dir.name}")
     tb_dir.mkdir(parents=True, exist_ok=True)
@@ -137,8 +122,8 @@ def main() -> int:
     all_examples = torch.load(args.precomputed, weights_only=False, map_location="cpu")
     all_sessions = sorted({e["session"] for e in all_examples})
     train_s, val_s = session_split(all_sessions, args.val_frac, args.seed)
-    train_ds = V13Dataset(args.precomputed, train_s)
-    val_ds = V13Dataset(args.precomputed, val_s)
+    train_ds = TargetCurveDataset(args.precomputed, train_s)
+    val_ds = TargetCurveDataset(args.precomputed, val_s)
     logging.info(
         f"sessions: total={len(all_sessions)}  "
         f"train={len(train_s)} ({len(train_ds)} ex)  "
@@ -147,11 +132,11 @@ def main() -> int:
 
     train_dl = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=True,
-        collate_fn=collate_v13, num_workers=args.num_workers, drop_last=True,
+        collate_fn=collate_examples, num_workers=args.num_workers, drop_last=True,
     )
     val_dl = DataLoader(
         val_ds, batch_size=args.batch_size, shuffle=False,
-        collate_fn=collate_v13, num_workers=args.num_workers,
+        collate_fn=collate_examples, num_workers=args.num_workers,
     )
 
     # ---- Model ----

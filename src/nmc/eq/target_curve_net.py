@@ -1,30 +1,8 @@
-"""TargetCurveNet — Stage 2 of the v13 contribution-mixer.
+"""Predict the mix-wide spectral correction from per-track contribution vectors.
 
-Predicts the mix-bus delta curve (engineer_mix_log_mel - dry_sum_log_mel)
-from the per-track contribution vectors C. Architecture: small transformer
-over track tokens, permutation-invariant, with a learned [MIX] token whose
-output is the prediction.
-
-Why a transformer (vs MLP / CNN / DeepSets):
-
-  - MLP on concatenated features assumes fixed track order/count; breaks
-    permutation invariance.
-  - CNN over time is wasteful — Stage 2's input is already time-averaged.
-  - DeepSets is permutation-invariant but pools each track independently:
-    no cross-track interactions. Misses masking-aware reasoning like
-    "bass + kick both at 100 Hz → cut 100 Hz on both."
-  - Transformer over track tokens: O(N²) attention (cheap; N ≤ 32),
-    permutation-invariant by construction (no positional embed),
-    full pairwise interactions.
-
-Output is the dB DELTA from dry-sum to engineer-mix, not the absolute
-target spectrum. The delta is a smaller, more invariant function to learn —
-"this mix needs less 200 Hz" is the same prediction regardless of how
-loud the input is.
-
-Bounded by tanh × max_delta_db to keep gradients well-conditioned and to
-prevent the model from blowing past engineering-realistic moves (±12 dB
-is already heavy mix-bus EQ).
+The transformer treats each track as a token. A learned mix token summarizes
+the set of tracks and predicts the dB correction for each frequency band.
+Track order is arbitrary. The reference mix supplies targets during training.
 """
 
 from __future__ import annotations
@@ -112,7 +90,7 @@ __all__ = ["TargetCurveNet"]
 
 
 def load_predictor(path):
-    """Restore a v13 target-curve checkpoint on CPU for inference."""
+    """Restore a target-curve checkpoint on CPU for inference."""
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     keys = ("n_bins", "d_model", "n_layers", "n_heads", "ffn_mult", "dropout", "max_delta_db")
     net = TargetCurveNet(**{k: checkpoint["args"][k] for k in keys}).eval()
