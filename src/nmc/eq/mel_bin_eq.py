@@ -1,7 +1,6 @@
-"""26-band mel-spaced gain-invariant EQ — the v13 EQ processor.
+"""Apply 26-band mel-spaced EQ with per-track RMS compensation.
 
-Replaces the v12 RBJ-biquad cascade (FFTEQ) with disjoint mel-band gain
-control. Design rationale (notes/v13_contribution_mixer_design.md):
+The filter uses disjoint mel bands for gain control.
 
   - Each FFT bin belongs to exactly one mel band → no cascade gauge.
     Every band's gain is independently identifiable from the output
@@ -61,7 +60,7 @@ class MelBinEQ(nn.Module):
 
     Args:
         sample_rate: audio sample rate (Hz)
-        n_bins: number of mel bands (26 matches the v13 auditory filterbank
+        n_bins: number of mel bands (26 matches the contribution-map filterbank
             spec; matches the per-track contribution vector dimensionality)
         gain_range_db: per-band gain range in dB; gain_norm ∈ [0,1] maps
             to [-gain_range_db, +gain_range_db]

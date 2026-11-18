@@ -1,19 +1,14 @@
-"""V13 Stage 2 in-memory dataset — loads precomputed (C, target) pairs.
-
-Examples are produced by `v13/scripts/precompute_v13_dataset.py`; this module
-just iterates them and splits by session (no within-session leakage).
-"""
+"""Read cached target curves and per-track contribution maps."""
 
 from __future__ import annotations
 
-from nmc.data.splits import session_split
 from pathlib import Path
 
 import torch
 from torch.utils.data import Dataset
 
 
-class V13Dataset(Dataset):
+class TargetCurveDataset(Dataset):
     """Loads precomputed examples; optionally filters to a session subset."""
 
     def __init__(
@@ -24,8 +19,8 @@ class V13Dataset(Dataset):
         path = Path(examples_path)
         if not path.is_file():
             raise FileNotFoundError(
-                f"v13 precomputed dataset not found: {path}. "
-                f"Run `uv run python v13/scripts/precompute_v13_dataset.py` first."
+                f"EQ dataset not found: {path}. "
+                f"Run `uv run python -m nmc.eq.precompute` first."
             )
         raw = torch.load(path, weights_only=False, map_location="cpu")
         if keep_sessions is not None:
@@ -57,7 +52,7 @@ class V13Dataset(Dataset):
         return {e["session"] for e in self.examples}
 
 
-def collate_v13(batch: list[dict]) -> dict:
+def collate_examples(batch: list[dict]) -> dict:
     out = {
         "C":               torch.stack([b["C"] for b in batch]),
         "target_delta_db": torch.stack([b["target_delta_db"] for b in batch]),
@@ -69,6 +64,3 @@ def collate_v13(batch: list[dict]) -> dict:
     if "group_idx" in batch[0]:
         out["group_idx"]  = torch.stack([b["group_idx"] for b in batch])
     return out
-
-
-__all__ = ["V13Dataset", "collate_v13", "session_split"]

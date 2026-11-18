@@ -1,7 +1,6 @@
-"""ContributionConsole — v13's per-track EQ + sum stage with closed-form
-delta distribution.
+"""Distribute a mix-wide EQ correction over the tracks and render their sum.
 
-Architecture (notes/v13_contribution_mixer_design.md):
+Processing steps:
 
     Input:
         stems            (B, N, 2, T)
@@ -174,7 +173,7 @@ class ContributionConsole(nn.Module):
 
         (The earlier `target_delta * C/ΣC` formula under-shoots the target
         sum effect by ~1/N for N near-uniform contributors — confirmed in
-        v13 audition: target +5 dB at the mix bus ⇒ +0.16 dB per track for
+        an earlier audition: target +5 dB at the mix bus ⇒ +0.16 dB per track for
         32 tracks. The LS formula is the math that actually hits target.)
         """
         contrib_lin = torch.expm1(C_mat).clamp(min=self.eps)    # invert log1p
