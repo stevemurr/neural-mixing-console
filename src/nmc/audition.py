@@ -136,6 +136,14 @@ class Handler(BaseHTTPRequestHandler):
         route = unquote(urlsplit(self.path).path)
         static = {
             "/": ("index.html", "text/html"),
+            "/desk": ("desk.html", "text/html"),
+            "/desk/": ("desk.html", "text/html"),
+            "/desk/desk-match.js": ("desk-match.js", "text/javascript"),
+            "/desk/desk-import.js": ("desk-import.js", "text/javascript"),
+            "/desk/desk-analysis.js": ("desk-analysis.js", "text/javascript"),
+            "/desk/desk-live.js": ("desk-live.js", "text/javascript"),
+            "/desk/desk.js": ("desk.js", "text/javascript"),
+            "/desk/desk.css": ("desk.css", "text/css"),
             "/player.js": ("player.js", "text/javascript"),
             "/style.css": ("style.css", "text/css"),
         }
@@ -145,6 +153,32 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_bytes(
                     files("nmc").joinpath("web", asset).read_bytes(), mime + "; charset=utf-8", head
                 )
+            if route == "/api/desk":
+                root = self.server.root / "erb-desk"
+                sessions = [
+                    json.loads(p.read_text())
+                    for p in root.glob("*/session.json")
+                    if re.fullmatch(r"[0-9a-f]{12}", p.parent.name) and p.resolve() == p
+                ]
+                sessions.sort(key=lambda s: (s["title"].casefold(), s["id"]))
+                return self.send_bytes(json.dumps(sessions).encode(), "application/json", head)
+            live = re.fullmatch(r"/desk/live/([0-9a-f]{12})/(ch[0-9]{3,})/(dry\.flac|kernels\.f32)", route)
+            if live:
+                session, bus, name = live.groups()
+                base = self.server.root / "erb-desk" / session
+                path = base / "live" / bus / name
+                if not (base / "session.json").is_file() or path.resolve() != path:
+                    return self.send_error(404)
+                mime = "audio/flac" if name == "dry.flac" else "application/octet-stream"
+                return self.audio(path, path.stat().st_size, head, mime)
+            desk_audio = re.fullmatch(r"/desk/audio/([0-9a-f]{12})/(mix|ch[0-9]{3,})/(off|1|3|6)\.flac", route)
+            if desk_audio:
+                session, bus, choice = desk_audio.groups()
+                base = self.server.root / "erb-desk" / session
+                path = base / bus / (choice + ".flac")
+                if not (base / "session.json").is_file() or path.resolve() != path:
+                    return self.send_error(404)
+                return self.audio(path, path.stat().st_size, head, "audio/flac")
             if route == "/api/runs":
                 runs, media = catalog(self.server.root)
                 self.server.media = media
@@ -167,7 +201,7 @@ class Handler(BaseHTTPRequestHandler):
         except FileNotFoundError:
             self.send_error(404)
 
-    def audio(self, path, size, head):
+    def audio(self, path, size, head, mime="audio/wav"):
         start, end = 0, size - 1
         header = self.headers.get("Range")
         if header:
@@ -181,7 +215,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(206 if header else 200)
         if header:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(end - start + 1))
         self.send_header("Accept-Ranges", "bytes")
         self.end_headers()

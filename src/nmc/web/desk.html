@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#141719" />
+    <title>Brown Noise Desk · Neural Mixing Console</title>
+    <link rel="stylesheet" href="/desk/desk.css" />
+    <script src="/desk/desk-live.js" defer></script>
+    <script src="/desk/desk-import.js" defer></script>
+    <script src="/desk/desk-match.js" defer></script>
+    <script src="/desk/desk.js" defer></script>
+  </head>
+  <body>
+    <header class="appbar">
+      <div class="brand">
+        <span class="brandmark" aria-hidden="true"
+          ><i></i><i></i><i></i><i></i><i></i></span
+        >Neural Mixing Console
+      </div>
+      <span class="division"></span><span class="viewname">Audition studio</span
+      ><a href="/" class="librarylink">Run library</a>
+    </header>
+    <div class="studio">
+      <aside class="shelf">
+        <div class="railhead">
+          <span class="eyebrow">Session browser</span
+          ><span id="count" class="counter"></span>
+        </div>
+        <div class="open-tracks">
+          <button type="button" id="openFolder">Open folder</button
+          ><button type="button" id="openFiles">Open files</button>
+        </div>
+        <input id="folderPicker" type="file" webkitdirectory multiple hidden />
+        <input
+          id="filePicker"
+          type="file"
+          accept="audio/*,.wav,.flac,.aif,.aiff"
+          multiple
+          hidden
+        />
+        <button id="localSong" class="session" type="button" hidden></button>
+        <nav id="sessions" aria-label="Audition sessions"></nav>
+        <section class="output">
+          <h2>Monitor output</h2>
+          <div class="meterline">
+            <b>L</b>
+            <div class="meter"><i id="meterL"></i></div>
+          </div>
+          <div class="meterline">
+            <b>R</b>
+            <div class="meter"><i id="meterR"></i></div>
+          </div>
+          <div class="meterkey">
+            <span>−60</span><span>−24</span><span>−12</span><span>0 dBFS</span>
+          </div>
+          <label class="volume"
+            >Volume <output id="volread">0 dB</output
+            ><input
+              type="range"
+              id="volume"
+              min="-60"
+              max="0"
+              value="0"
+              aria-label="Monitor gain in decibels"
+          /></label>
+        </section>
+      </aside>
+      <main>
+        <div class="headline">
+          <div>
+            <div class="eyebrow accent">Channel processor</div>
+            <h1>Brown Noise Desk</h1>
+          </div>
+          <span class="matched"
+            ><i></i><span id="matchStatus">Loudness matched</span></span
+          >
+        </div>
+        <div class="console">
+          <section class="arrange">
+            <div class="sectionhead">
+              <div>
+                <div class="eyebrow">Session</div>
+                <h2 id="song">Session</h2>
+                <span id="artist"></span>
+              </div>
+              <span id="trackCount" class="tag"></span>
+            </div>
+            <div class="transport">
+              <button
+                class="transport-btn"
+                id="rewind"
+                title="Return to start (Home)"
+                aria-label="Return to start"
+              >
+                Ⅰ◀</button
+              ><button class="play" id="play" aria-label="Play" disabled>
+                <span aria-hidden="true">▶</span
+                ><span id="playtext">Play</span></button
+              ><button
+                class="transport-btn"
+                id="loop"
+                aria-pressed="true"
+                title="Toggle loop (L)"
+                aria-label="Loop excerpt"
+              >
+                ↻
+              </button>
+              <div class="time" id="time">00:00.0</div>
+              <span class="duration" id="duration"></span>
+            </div>
+            <div
+              id="deskViews"
+              class="desk-views"
+              aria-label="Desk view"
+              role="group"
+              hidden
+            >
+              <button type="button" id="mixerView" aria-controls="mixer">
+                Mixer
+              </button>
+              <button
+                type="button"
+                id="arrangeView"
+                aria-controls="arrangement"
+              >
+                Arrangement
+              </button>
+            </div>
+            <div id="mixer" hidden>
+              <div class="mix-heading">
+                <span>Post-fader · dBFS</span>
+                <div class="strip-nav">
+                  <button
+                    type="button"
+                    id="stripsBack"
+                    aria-label="Previous channels"
+                  >
+                    ←</button
+                  ><button
+                    type="button"
+                    id="stripsNext"
+                    aria-label="Next channels"
+                  >
+                    →
+                  </button>
+                </div>
+              </div>
+              <div id="strips" aria-label="Channel strips"></div>
+            </div>
+            <template id="stripTemplate">
+              <section class="strip">
+                <button class="strip-name" type="button">
+                  <small></small><strong></strong>
+                </button>
+                <label class="strip-pan"
+                  ><span>Pan</span
+                  ><input
+                    type="range"
+                    min="-100"
+                    max="100"
+                    step="1"
+                    value="0"
+                  /><output>C</output></label
+                >
+                <div class="strip-switches">
+                  <button class="mute" type="button">M</button
+                  ><button class="strip-solo" type="button">S</button>
+                </div>
+                <div class="strip-throw">
+                  <div class="fader-scale" aria-hidden="true">
+                    <span>+12</span><span>0</span><span>−12</span
+                    ><span>−24</span><span>−36</span><span>−48</span
+                    ><span>−∞</span>
+                  </div>
+                  <input
+                    class="strip-fader"
+                    type="range"
+                    min="-60"
+                    max="12"
+                    step="0.1"
+                    value="0"
+                    aria-orientation="vertical"
+                  />
+                  <div class="strip-meters" aria-hidden="true">
+                    <i></i><i></i>
+                  </div>
+                </div>
+                <output class="strip-db"></output
+                ><span class="strip-peak" title="Post-fader sample peak in dBFS"
+                  >−∞ dBFS</span
+                >
+              </section>
+            </template>
+            <div id="arrangement">
+              <div class="ruler">
+                <div class="trackhead">Channel</div>
+                <div class="rulergrid" id="ruler"></div>
+              </div>
+              <div class="lanes" id="lanes"></div>
+            </div>
+            <label class="scrub"
+              >Playhead<input
+                id="seek"
+                type="range"
+                step="0.01"
+                min="0"
+                max="20"
+                value="0"
+                aria-label="Seek excerpt"
+            /></label>
+            <div class="arrangefoot">
+              <span id="listenBus">Mix bus</span><span id="excerpt"></span>
+            </div>
+          </section>
+          <aside class="inspector">
+            <section id="tonePanel" class="insert" hidden>
+              <h2>Console sound</h2>
+              <div class="tone-modes" role="group" aria-label="Console sound">
+                <button id="toneOn" class="balanceChoice">Desk</button>
+                <button id="toneOff" class="balanceChoice">Bypass desk</button>
+                <button id="comparison" class="balanceChoice">
+                  Audition presets
+                </button>
+              </div>
+            </section>
+            <section id="colorPanel" class="insert" hidden>
+              <div class="eyebrow">Channel saturation</div>
+              <h2>Transformer drive</h2>
+              <div
+                id="colors"
+                role="group"
+                aria-label="Channel saturation"
+              ></div>
+              <div id="driveControl" class="amount-control" hidden>
+                <label for="driveKnob">Drive</label>
+                <div class="amount-body">
+                  <div class="dial">
+                    <i aria-hidden="true"></i>
+                    <input
+                      id="driveKnob"
+                      type="range"
+                      min="-12"
+                      max="24"
+                      step="0.1"
+                      value="0"
+                      title="Drag up or right to drive each track harder. Double-click for nominal drive."
+                    />
+                  </div>
+                  <output id="driveReadout" for="driveKnob">0.0 dB</output>
+                </div>
+              </div>
+              <div id="colorInfo" class="balanceInfo"></div>
+            </section>
+            <details id="balancePanel" class="insert" hidden>
+              <summary class="eyebrow">Fader comparison / Explore EQ</summary>
+              <div id="balances" role="group" aria-label="Fader balance"></div>
+              <div id="balanceInfo" class="balanceInfo"></div>
+            </details>
+            <div class="insert">
+              <div class="eyebrow">Channel EQ</div>
+              <h2>ERB equalizer</h2>
+              <div class="widthhead">
+                <label>Smoothing width</label><kbd>1–3</kbd>
+              </div>
+              <div
+                id="widths"
+                class="segments"
+                aria-label="Smoothing width"
+              ></div>
+              <button id="bypass" class="bypass" aria-pressed="true">
+                <span class="switch"></span>Bypass EQ <kbd>0</kbd>
+              </button>
+              <div class="parameters">
+                <div class="amount-control">
+                  <label for="amountKnob">Amount</label>
+                  <div class="amount-body">
+                    <div class="dial">
+                      <i aria-hidden="true"></i>
+                      <input
+                        id="amountKnob"
+                        type="range"
+                        min="0"
+                        max="100"
+                        value="15"
+                        step="1"
+                        title="Drag up or right to increase. Double-click for 15%."
+                      />
+                    </div>
+                    <output id="amount" for="amountKnob">15%</output>
+                  </div>
+                </div>
+                <div>
+                  <span>Gain limit</span><strong id="limit">±2 dB</strong>
+                </div>
+              </div>
+            </div>
+            <section class="response">
+              <div class="eyebrow">Channel response</div>
+              <h3 id="channelName">Select channel</h3>
+              <div class="plot">
+                <canvas
+                  id="curve"
+                  aria-label="Selected channel EQ response"
+                ></canvas>
+              </div>
+              <div class="legend">
+                <i></i><span id="curveLabel">Bypass</span>
+              </div>
+              <div class="channelinfo" id="trackRange"></div>
+              <div class="channelinfo" id="channelInfo"></div>
+              <div class="channelinfo" id="faderInfo"></div>
+              <button id="inspectSolo" class="soloFull" aria-pressed="false">
+                Solo channel <kbd>S</kbd>
+              </button>
+            </section>
+          </aside>
+        </div>
+        <div class="status">
+          <span id="status" role="status">Loading sessions…</span
+          ><span id="format"></span>
+        </div>
+      </main>
+    </div>
+    <footer>
+      <span>Neural Mixing Console</span
+      ><span><kbd>Space</kbd> Play / pause <kbd>L</kbd> Loop</span>
+    </footer>
+  </body>
+</html>

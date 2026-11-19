@@ -32,6 +32,52 @@ The library reads local run records and WAVs directly. Refresh the run library a
 
 Current attempts live under `runs/<recipe>/<run-id>/`. The legacy logs, PID files and TensorBoard event directories from this checkout were moved together into `dmc-data/archive/runs-pre-manifests/` with their original names.
 
+### Brown Noise Desk
+
+For fresh-checkout startup, DSP formulas, signal routing and port verification, see the [EQ and saturation handoff](docs/brown-noise-desk.md).
+
+Choose **Brown Noise Desk** in the run library or open `/desk/` on the same server. Press Space to play. Keys 1, 2 and 3 switch between 1, 3 and 6 ERB widths during playback. Key 0 selects bypass. Click a channel name to inspect its response or its S button to hear the isolated track.
+
+Click **Open folder** to play aligned mono or stereo files on your computer, or **Open files** to select individual tracks. The browser decodes the full songs at 48 kHz. Tracks start together and shorter files end in silence. Imported audio stays in browser memory until you open another set or close the page. Large sessions need enough browser memory for the decoded audio.
+
+**Desk** is the default sound of every live session. Each channel runs through its own brown-noise EQ, 4× oversampled saturation, and mixer strip. Start at 1 ERB, 100% EQ and nominal drive. Turn Amount and Drive independently while playing. **Bypass desk** switches both color stages together and keeps the faders and pan. Desk matches the processed stereo bus to bypass using K-weighted loudness measured after the current faders, pans and mutes. The browser measures seven drive settings from −12 to +24 dB, then interpolates monitor gain in decibels as you turn Drive. Each setting has a constant gain, so a held setting preserves dynamics. Up to 12 seconds are measured in full. For longer songs, the browser measures synchronized passages distributed across the song. **Measuring level match…** appears when changing EQ, mixer settings or solo requires a fresh measurement. Both choices share peak headroom based on the measured audio. **Audition presets** opens the existing calibrated comparisons on prepared sessions.
+
+On import, a browser worker analyzes up to 48 active windows sampled across each file. It derives a stereo-linked EQ curve against the same ERB brown-noise target and sets nominal drive from active input RMS. The EQ profile stays fixed for playback. The saturator responds to the instantaneous post-EQ signal. The prototype plays files from memory and loops the session.
+
+For a reusable, calibrated audition excerpt, prepare a session from aligned tracks:
+
+    uv run python -m nmc.desk_session /audio/song/raw --title "Song title" --seconds 20
+
+The command writes a new session under `runs/erb-desk/`. Reload the desk to see it. Use `--start` for a specific excerpt in seconds. The default selects an excerpt with activity across the tracks. Optional MedleyDB YAML supplies display labels.
+
+The excerpt preparation command samples up to 24 one-second passages across each track, averages active-frame channel powers and measures a band-limited brown-noise spectrum through the same 43 overlapping ERB filters (20 Hz to 22.05 kHz). It aligns the target to the track's supported frequencies and smooths the difference at the chosen Gaussian full width at half maximum. The browser plays the dry tracks through stereo-linked FIR filters. Turn **Amount** by dragging up or right, or use the arrow keys while the knob has focus. Moving the knob engages the selected width. Double-click to return to 15%.
+
+At 0% the response is flat. At 15% the original soft limit is ±2 dB. At 100% the per-track response can reach ±13.3 dB. Intermediate settings blend aligned filter responses in linear amplitude. The inspector shows the selected track’s applied curve and gain range. The curve is derived once per song. Filtering and gain changes run in Web Audio while the loop plays.
+
+In the prepared audition presets, each bus has an integrated-loudness trim for every width and integer Amount. Preparation calculates these from K-weighted block powers, including correlation between filter outputs, using a common peak headroom for the bus. A fixed-amount session can be upgraded at its existing URL by supplying its original track folder and `--upgrade SESSION_ID`.
+
+#### Channel mixer
+
+Live sessions open in Mixer view. Each raw track has a post-insert fader, pan or stereo balance, mute, solo and two post-fader sample-peak meters (dBFS). The fader runs from silence to +12 dB. Double-click a fader for unity or a pan slider for center. Mono uses equal-power panning referenced to the original center gain. Stereo balance attenuates the opposite side independently. In Audition presets, the original EQ and saturation loudness calibration applies at unity with centered, unmuted strips. Manual edits persist per song while the page is open. Switch to Arrangement to see the waveforms.
+
+#### Channel saturation
+
+On *Miss Thing* and *Alive*, **Audition presets** opens on **Clean EQ**. Drag **Drive** up or right to sweep from −12 to +24 dB while the loop plays. Double-click for nominal drive (0 dB). Switch between **Clean EQ** and **Saturation** to compare at the same knob setting, or solo a raw channel. The shared knob drives each channel’s nonlinear stage after its 1 ERB / 100% EQ. The mix uses unity faders. Each channel has a fixed operating level, chosen from its active 50 ms post-EQ levels. Stereo channels share that gain. A low shelf drives low frequencies into a mildly asymmetric soft knee, followed by reciprocal EQ and DC removal. The browser applies 4× oversampling at the nonlinear stage. This is an original transformer-inspired voicing; an individual hardware console has its own measured response.
+
+Preparation measures the excerpt loudness every 3 dB on the mix bus and separately for each solo. The browser interpolates the monitoring trim in decibels while you turn the knob. Use the clean setting for a level-matched EQ-only reference. Prepare the operating levels and trims on an existing live session with:
+
+    uv run python -m nmc.desk_saturation runs/erb-desk/<session-id>
+
+#### Fader comparison
+
+Expand **Fader comparison / Explore EQ** to audition the three static balances. All three use the same 20-second loop, 1 ERB at 100%, and static source faders. **Unity faders** keeps the raw recording levels. **Active loudness** sums the post-EQ microphones in each annotated stem, measures median K-weighted loudness over its active 400 ms blocks, and closes one third of the gap to the median source, up to ±4 dB.
+
+**Vocal-anchored ERB** holds the designated vocal group at unity and starts other groups at their active-loudness faders. A 1 dB trial cut measures each group's effect on the actual mix spectrum. Bands with vocal energy receive more weight, and competing sources receive a further static cut when they dominate those bands during singing. All faders remain within ±4 dB. Settings are fitted to the audition excerpt. The mix monitor applies one constant loudness trim per mode with shared headroom. The inspector shows the selected track's group fader, and solo monitors the level-matched pre-fader channel. Choose **Explore EQ** to return to width and Amount controls.
+
+To prepare the comparison on an existing live session, pass the session folder, its MedleyDB YAML and the anchor stem ID:
+
+    uv run python -m nmc.desk_balance runs/erb-desk/<session-id> <song>_METADATA.yaml --anchor S05
+
 ## Reproduce and track an experiment
 
 From the repository root, install the project with `uv sync --locked`. For an existing research environment with locally installed audio tools, `uv pip install --no-deps --no-build-isolation -e .` installs the command using the environment’s existing dependencies and setuptools.
